@@ -10,8 +10,10 @@ let port;
 const sockets = [];
 
 before(async () => {
-  // Bots move instantly and the grace period is short so the tests run fast.
-  app = createApp({ botDelay: [0, 0], graceMs: 150 });
+  // Bots move instantly and the grace period is short so the tests run fast. The tests
+  // also click far faster than a person could, so the message limit is lifted here
+  // and checked on its own below.
+  app = createApp({ botDelay: [0, 0], graceMs: 150, messagesPer10s: 100_000 });
   port = await app.listen(0, '127.0.0.1');
 });
 
@@ -21,8 +23,8 @@ after(async () => {
 });
 
 /** A test client: collects messages and lets a test wait for the one it needs. */
-async function connect() {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+async function connect(toPort = port) {
+  const ws = new WebSocket(`ws://127.0.0.1:${toPort}/ws`);
   sockets.push(ws);
   const inbox = [];
   const waiting = [];
@@ -46,10 +48,15 @@ async function connect() {
         const seen = inbox.findLast(match);
         if (seen) return Promise.resolve(seen);
       }
+      // Made here, not in the timer, so a timeout's stack trace points at the wait that was never answered.
+      const timedOut = new Error('timed out waiting for a message');
       return new Promise((resolve, reject) => {
         const w = { match, resolve };
         waiting.push(w);
-        setTimeout(() => reject(new Error('timed out waiting for a message')), 3000).unref();
+        setTimeout(() => {
+          timedOut.message += `; last received: ${JSON.stringify(inbox.at(-1) ?? null).slice(0, 300)}`;
+          reject(timedOut);
+        }, 3000).unref();
       });
     },
     state: (match = () => true, options) => client.next((m) => m.t === 'state' && match(m), options),
@@ -74,8 +81,8 @@ async function connect() {
   return client;
 }
 
-async function createRoom(name = 'Host', player) {
-  const host = await connect();
+async function createRoom(name = 'Host', player, toPort) {
+  const host = await connect(toPort);
   const joined = host.next((m) => m.t === 'joined');
   host.send({ t: 'create', name, player });
   const { code, token, id } = await joined;
@@ -128,7 +135,7 @@ test('lobby: joining, teams, bots, settings and host-only actions', async () => 
   await host.fails({ t: 'settings', settings: { deck: 48 } });
   await host.fails({ t: 'settings', settings: { constructor: 1 } });
   state = await host.act({ t: 'settings', settings: { deck: 72, history: 'last' } }, (s) => s.settings.deck === 72);
-  assert.deepEqual(state.settings, { deck: 72, declare: 'turn', history: 'last' });
+  assert.deepEqual(state.settings, { deck: 72, declare: 'turn', history: 'last', botPace: 'step' });
 
   // Switching teams, and a full team refusing a fifth player.
   const teamA = (s) => s.members.filter((m) => m.team === 'A');
@@ -160,15 +167,8 @@ test('a game: private hands, asking, declaring, spectators', async () => {
   host.send({ t: 'start' });
   await guestStarted;
 
-  // Bots play by themselves until it is a human's turn, so wait for things to settle.
-  const settle = async (client) => {
-    let state = await client.state(() => true, { fresh: false });
-    for (;;) {
-      const mover = state.members.find((m) => m.id === state.game.turn);
-      if (state.phase !== 'playing' || !mover.bot) return state;
-      state = await client.state((s) => s.game.log.length > state.game.log.length || s.phase !== 'playing');
-    }
-  };
+  // Step the bots along until it is a human's turn.
+  const settle = humanToMove;
   let mine = await settle(host);
   let theirs = await settle(guest);
 
@@ -273,15 +273,122 @@ test('the host role moves on when the host stays away', async () => {
   assert.deepEqual(state.members.map((m) => m.name), ['Grace']);
 });
 
-/** Waits out the bots: resolves with the client's view once a human is to move or the game is over. */
+/**
+ * Gets past the bots: presses Next for each bot move (or waits, in an automatic
+ * game) and resolves with the client's view once a human is to move or the game is over.
+ */
 async function humanToMove(client) {
   let state = await client.state(() => true, { fresh: false });
   for (;;) {
     const mover = state.members.find((m) => m.id === state.game.turn);
     if (state.phase !== 'playing' || !mover.bot) return state;
-    state = await client.state((s) => s.game.log.length > state.game.log.length || s.phase !== 'playing');
+    const moved = client.state((s) => s.game.position > state.game.position || s.phase !== 'playing');
+    if (state.game.awaitingNext) client.send({ t: 'next', at: state.game.position });
+    state = await moved;
   }
 }
+
+/** A question the client may legally put to a bot on the other team, from the client's own view. */
+function legalAsk(state) {
+  const me = state.members.find((m) => m.id === state.you);
+  const target = state.members.find((m) => m.bot && m.team !== me.team && m.cards > 0);
+  for (const set of buildSets(state.game.deck)) {
+    const missing = set.cards.find((card) => !state.game.hand.includes(card));
+    if (missing && set.cards.some((card) => state.game.hand.includes(card))) return { t: 'ask', target: target.id, card: missing };
+  }
+  throw new Error('no legal ask');
+}
+
+/** Has the human ask bots until a question fails, which hands the turn to a bot. */
+async function untilBotToMove(client) {
+  let state = await client.state(() => true, { fresh: false });
+  for (let guard = 0; guard < 60; guard++) {
+    if (state.game.turn !== state.you) return state;
+    const before = state.game.position;
+    state = await client.act(legalAsk(state), (s) => s.game.position > before);
+    assert.equal(state.t, 'state', state.message);
+  }
+  throw new Error('the turn never reached a bot');
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('bots wait for a player to press Next, and take one decision per press', async () => {
+  const { host, code } = await createRoom('Ada');
+  await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 2);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 3);
+  const lobby = await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  assert.equal(lobby.settings.botPace, 'step', 'stepping is the default');
+
+  const started = host.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  await started;
+  let state = await untilBotToMove(host);
+  assert.equal(state.game.awaitingNext, true);
+
+  // Nothing happens until someone asks for it.
+  const at = state.game.position;
+  await pause(120);
+  state = await host.state(() => true, { fresh: false });
+  assert.equal(state.game.position, at);
+
+  // A spectator can't step the game.
+  const { client: watcher } = await joinRoom(code, 'Watcher');
+  assert.match((await watcher.fails({ t: 'next', at })).message, /Only players/);
+
+  // A press for some other moment in the game is quietly ignored.
+  state = await host.act({ t: 'next', at: at - 1 });
+  assert.equal(state.t, 'state');
+  assert.equal(state.game.position, at);
+  state = await host.act({ t: 'next' });
+  assert.equal(state.game.position, at);
+
+  // One press, one decision. Two presses for the same move (two players clicking at once) still make one.
+  const moved = host.state((s) => s.game.position > at);
+  host.send({ t: 'next', at });
+  host.send({ t: 'next', at });
+  state = await moved;
+  assert.equal(state.game.position, at + 1);
+  await pause(60);
+  state = await host.state(() => true, { fresh: false });
+  assert.equal(state.game.position, at + 1);
+  assert.equal(state.game.log.at(-1).seq, at + 1);
+
+  // On a human's turn there is nothing to step.
+  state = await humanToMove(host);
+  if (state.phase === 'playing') {
+    assert.equal(state.game.awaitingNext, false);
+    assert.match((await host.fails({ t: 'next', at: state.game.position })).message, /No bot/);
+  }
+});
+
+test('with the automatic rule, bots play on their own', async () => {
+  // Its own server, whose bots take a moment to move: long enough to see that
+  // a Next press is refused while one is about to play.
+  const slow = createApp({ botDelay: [150, 150] });
+  const slowPort = await slow.listen(0, '127.0.0.1');
+  try {
+    const { host } = await createRoom('Ada', undefined, slowPort);
+    await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 2);
+    await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 3);
+    await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+    await host.act({ t: 'settings', settings: { botPace: 'auto' } }, (s) => s.settings.botPace === 'auto');
+    const started = host.state((s) => s.phase === 'playing');
+    host.send({ t: 'start' });
+
+    // A bot is about to move: either one starts, or the human asks until a question fails.
+    let state = await started;
+    if (state.game.turn === state.you) state = await untilBotToMove(host);
+    assert.equal(state.game.awaitingNext, false);
+    const at = state.game.position;
+    assert.match((await host.fails({ t: 'next', at })).message, /No bot/);
+    // ...and then the bot moves without being asked.
+    const moved = await host.state((s) => s.game?.position > at, { fresh: false });
+    assert.ok(moved.game.position > at);
+  } finally {
+    await slow.close();
+  }
+});
 
 /** Plays a started game to its end: bots move by themselves, and each human declares a set whenever it is their turn. */
 async function playToEnd(clients) {
@@ -388,4 +495,28 @@ test('practice games leave ratings alone: bots only, or one player in two seats'
   assert.equal(withGuest.members.find((m) => m.id === withGuest.you).rating, null);
   assert.equal((await ratingsFor(guest, undefined)).me, null);
   assert.equal((await ratingsFor(guest, 'too-short')).me, null);
+});
+
+test('a connection that sends too much is told so, never just ignored', async () => {
+  const strict = createApp({ messagesPer10s: 5 });
+  const strictPort = await strict.listen(0, '127.0.0.1');
+  const ws = new WebSocket(`ws://127.0.0.1:${strictPort}/ws`);
+  try {
+    await new Promise((resolve, reject) => ws.once('open', resolve).once('error', reject));
+    const replies = [];
+    const done = new Promise((resolve) => {
+      ws.on('message', (data) => {
+        replies.push(JSON.parse(data.toString()));
+        if (replies.length === 8) resolve();
+      });
+    });
+    for (let i = 0; i < 8; i++) ws.send(JSON.stringify({ t: 'hello' }));
+    await done;
+    // Every message gets an answer: five are served, and the rest are refused in words.
+    assert.deepEqual(replies.map((m) => m.t), ['ratings', 'ratings', 'ratings', 'ratings', 'ratings', 'error', 'error', 'error']);
+    assert.match(replies.at(-1).message, /too fast/);
+  } finally {
+    ws.terminate();
+    await strict.close();
+  }
 });

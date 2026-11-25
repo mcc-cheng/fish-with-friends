@@ -26,6 +26,14 @@ const SETTINGS = [
     ],
   },
   {
+    key: 'botPace',
+    label: 'Bot moves',
+    options: [
+      ['step', 'One at a time', 'A bot waits until a player presses Next, so everyone can follow each move.'],
+      ['auto', 'Automatic', 'Bots play by themselves after a short pause.'],
+    ],
+  },
+  {
     key: 'history',
     label: 'Question history',
     options: [
@@ -288,6 +296,14 @@ function submitAsk() {
   if (send({ t: 'ask', target: state.askTarget, card: state.askCard })) {
     state.busy = true;
     state.askCard = null;
+    render();
+  }
+}
+
+/** Lets the bot whose turn it is make its move. Says which move we were looking at, so a second press can't skip one. */
+function stepBot() {
+  if (send({ t: 'next', at: state.view.game.position })) {
+    state.busy = true;
     render();
   }
 }
@@ -745,7 +761,9 @@ function gameContext() {
   const myTurn = seated && g.turn === v.you;
   const foes = seats.filter((m) => m.team !== myTeam);
   const canAsk = myTurn && foes.some((m) => m.cards > 0) && sets.some((s) => !s.claimedBy && s.held > 0 && s.held < s.cards.length);
-  return { v, g, byId, me, seated, myTeam, hand, sets, setSize: sets[0].cards.length, seats, myTurn, foes, canAsk, isHost: v.hostId === v.you };
+  const isHost = v.hostId === v.you;
+  const canStep = v.phase === 'playing' && g.awaitingNext && (seated || isHost);
+  return { v, g, byId, me, seated, myTeam, hand, sets, setSize: sets[0].cards.length, seats, myTurn, foes, canAsk, canStep, isHost };
 }
 
 /** A player's name in their team colour; "you" for the viewer. */
@@ -857,56 +875,65 @@ function banner(c) {
   const last = g.log.at(-1);
   const next = g.turn ? h('span', { class: 'next' }, g.turn === c.v.you ? 'Your turn.' : [who(c, g.turn, { capital: true }), ' to play.']) : null;
 
-  if (!last) return h('section', { class: 'banner panel', 'aria-live': 'polite' }, h('p', { class: 'banner-text' }, 'The cards are dealt. ', next));
-
-  if (last.type === 'ask') {
-    return h(
-      'section',
-      { class: `banner panel ${last.success ? 'good' : 'bad'}`, 'aria-live': 'polite' },
+  let tone = null;
+  let body;
+  if (!last) {
+    body = h('p', { class: 'banner-text' }, 'The cards are dealt. ', next);
+  } else if (last.type === 'ask') {
+    tone = last.success ? 'good' : 'bad';
+    body = h(
+      'p',
+      { class: 'banner-text' },
+      who(c, last.asker, { capital: true }),
+      ' asked ',
+      who(c, last.target),
+      ' for the ',
+      cardChip(last.card),
+      last.success ? ' and got it. ' : [', but ', who(c, last.target), last.target === c.v.you ? ' don’t' : ' doesn’t', ' have it. '],
+      next,
+    );
+  } else {
+    const set = c.sets.find((s) => s.id === last.set);
+    tone = last.correct ? 'good' : 'bad';
+    body = [
       h(
         'p',
         { class: 'banner-text' },
-        who(c, last.asker, { capital: true }),
-        ' asked ',
-        who(c, last.target),
-        ' for the ',
-        cardChip(last.card),
-        last.success ? ' and got it. ' : [', but ', who(c, last.target), last.target === c.v.you ? ' don’t' : ' doesn’t', ' have it. '],
+        who(c, last.declarer, { capital: true }),
+        last.correct ? ' declared ' : ' misdeclared ',
+        h('strong', {}, set.name),
+        last.correct ? '. A set for ' : '. The set goes to ',
+        h('span', { class: `who team-${last.team}` }, TEAM_NAMES[last.team]),
+        '. ',
         next,
       ),
-    );
+      h(
+        'div',
+        { class: 'reveal' },
+        set.cards.map((card) => {
+          const wrong = last.actual[card] !== last.assignment[card];
+          return h(
+            'span',
+            { class: cls('reveal-item', wrong && 'wrong') },
+            cardChip(card),
+            ' ',
+            who(c, last.actual[card]),
+            wrong ? h('span', { class: 'muted' }, ' (said ', who(c, last.assignment[card]), ')') : null,
+          );
+        }),
+      ),
+    ];
   }
 
-  const set = c.sets.find((s) => s.id === last.set);
+  // When a bot is waiting, the Next button sits right beside what just happened:
+  // read it, press, read the next one. It stays in the same place from move to move.
   return h(
     'section',
-    { class: `banner panel ${last.correct ? 'good' : 'bad'}`, 'aria-live': 'polite' },
-    h(
-      'p',
-      { class: 'banner-text' },
-      who(c, last.declarer, { capital: true }),
-      last.correct ? ' declared ' : ' misdeclared ',
-      h('strong', {}, set.name),
-      last.correct ? '. A set for ' : '. The set goes to ',
-      h('span', { class: `who team-${last.team}` }, TEAM_NAMES[last.team]),
-      '. ',
-      next,
-    ),
-    h(
-      'div',
-      { class: 'reveal' },
-      set.cards.map((card) => {
-        const wrong = last.actual[card] !== last.assignment[card];
-        return h(
-          'span',
-          { class: cls('reveal-item', wrong && 'wrong') },
-          cardChip(card),
-          ' ',
-          who(c, last.actual[card]),
-          wrong ? h('span', { class: 'muted' }, ' (said ', who(c, last.assignment[card]), ')') : null,
-        );
-      }),
-    ),
+    { class: cls('banner panel', tone, c.canStep && 'stepping'), 'aria-live': 'polite' },
+    h('div', { class: 'banner-body' }, body),
+    c.canStep
+      ? h('button', { class: 'btn primary next-btn', disabled: state.busy, title: 'Let the bot make its move', onclick: stepBot }, 'Next', h('span', { class: 'key-hint', 'aria-hidden': 'true' }, 'space'))
+      : null,
   );
 }
 
@@ -957,7 +984,9 @@ function actionPanel(c) {
   }
 
   if (!c.myTurn) {
-    const waiting = h('p', { class: 'waiting' }, 'Waiting for ', who(c, c.g.turn), '…');
+    const waiting = c.g.awaitingNext
+      ? h('p', { class: 'waiting' }, who(c, c.g.turn, { capital: true }), ' is a bot, and moves when a player presses Next.')
+      : h('p', { class: 'waiting' }, 'Waiting for ', who(c, c.g.turn), '…');
     if (!c.g.declareAnytime) return h('section', { class: 'panel action' }, waiting);
     return h(
       'section',
@@ -1206,6 +1235,15 @@ function logPanel(c) {
 // ---------------------------------------------------------------- start
 
 window.addEventListener('popstate', () => location.reload());
+// Space or Enter steps through the bots' moves, unless the key was meant for a control that has focus.
+document.addEventListener('keydown', (event) => {
+  if ((event.key !== ' ' && event.key !== 'Enter') || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.target.closest?.('input, button, a, summary, label, select, textarea')) return;
+  const button = document.querySelector('.next-btn:not(:disabled)');
+  if (!button) return;
+  event.preventDefault();
+  button.click();
+});
 // Follow the system's light/dark setting until the player picks a theme themselves.
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
   if (load(localStorage, 'fish:theme')) return;

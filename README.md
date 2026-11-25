@@ -50,7 +50,11 @@ The host picks the house rules in the lobby:
 | --- | --- |
 | Deck | **Nine sets of six** (54 cards): low is 2–7, high is 9–A, and the 8s plus two jokers make the ninth set. **Nine sets of eight** (72 cards): the same deck stretched with a 0, 1, 11 and 12 in every suit and four jokers, so low is 0–7 and high is 9–A. It gives 8 players nine cards each. |
 | Declaring | **On your turn** only, or **any time** by anyone. |
+| Bot moves | **One at a time**: a bot waits until a player presses Next (or Space), so everyone can follow each move. **Automatic**: bots play by themselves after a short pause. |
 | Question history | **Full log** for everyone, or the **last question only** as at a real table. |
+
+With bots moving one at a time, any seated player (or the host) can press Next, and each press lets the
+bot make exactly one decision. If two people press at once, only one move happens.
 
 Dropping out doesn't lose your seat: reloading or reconnecting puts you back in it. If someone is gone for
 good, the host can let a bot play their cards, or anyone who opens the room link can take over the seat.

@@ -17,7 +17,12 @@ const LOG_MAX = 300; // events sent to clients
 const CODE_LETTERS = 'BCDFGHJKLMNPQRSTVWXZ'; // no vowels, so codes never spell words
 const BOT_NAMES = ['Guppy', 'Minnow', 'Tetra', 'Koi', 'Pike', 'Trout', 'Perch', 'Bass'];
 // The first value of each setting is its default.
-const SETTING_VALUES = { deck: [54, 72], declare: ['turn', 'anytime'], history: ['full', 'last'] };
+const SETTING_VALUES = {
+  deck: [54, 72],
+  declare: ['turn', 'anytime'],
+  history: ['full', 'last'],
+  botPace: ['step', 'auto'], // bots wait for a player to press Next, or play by themselves after a pause
+};
 
 function cleanName(raw) {
   const name = String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, 20).trim();
@@ -330,6 +335,19 @@ export class Rooms {
         return;
       }
 
+      case 'next': {
+        // Step-by-step games: a bot moves only when a player says they are ready for it.
+        if (!game) return 'There is no game in progress.';
+        // `at` is the move the player was looking at. If play has moved on since
+        // (someone else pressed first), this press has already been answered.
+        if (msg.at !== game.log.length) return;
+        const bot = this.botToMove(room);
+        if (!bot || room.settings.botPace !== 'step') return 'No bot is waiting to move.';
+        if (!this.seated(room, me) && !isHost) return 'Only players can press Next.';
+        this.moveBot(room, bot.id);
+        return;
+      }
+
       case 'claimSeat': {
         // A spectator takes over a seat whose player has dropped out. This is also
         // how someone gets back in after losing their session (new device, closed tab).
@@ -429,6 +447,8 @@ export class Rooms {
         winner: game.winner,
         hand: sortCards([...(game.hands.get(member.id) ?? [])]),
         log,
+        position: game.log.length, // counts every move, even when the visible log is cut short
+        awaitingNext: room.settings.botPace === 'step' && Boolean(this.botToMove(room)),
         ratingChanges: room.rating?.changes?.map(({ id, ...change }) => ({ ...change, you: id === member.pid })) ?? null,
       },
     };
@@ -466,10 +486,18 @@ export class Rooms {
 
   // ---- bots ----
 
-  scheduleBot(room) {
+  /** The bot whose turn it is (a real bot, or one covering an absent player's seat), if any. */
+  botToMove(room) {
     const game = room.game;
     const mover = game?.phase === 'playing' ? room.members.get(game.turn) : null;
-    if (!mover || !(mover.isBot || mover.botControlled)) {
+    return mover && (mover.isBot || mover.botControlled) ? mover : null;
+  }
+
+  /** In automatic games, lines up the bot's move after a short pause. Step-by-step games wait for 'next' instead. */
+  scheduleBot(room) {
+    const game = room.game;
+    const mover = room.settings.botPace === 'auto' ? this.botToMove(room) : null;
+    if (!mover) {
       clearTimeout(room.botTimer);
       room.botTimer = room.botKey = null;
       return;
@@ -487,8 +515,14 @@ export class Rooms {
   }
 
   playBot(room, id) {
+    if (this.botToMove(room)?.id !== id) return;
+    this.moveBot(room, id);
+    this.broadcast(room);
+  }
+
+  /** The bot makes one decision: a question or a declaration. */
+  moveBot(room, id) {
     const game = room.game;
-    if (game?.phase !== 'playing' || game.turn !== id) return;
     let result;
     try {
       const move = chooseMove(game, id, this.options.rng);
@@ -502,6 +536,5 @@ export class Rooms {
       declare(game, id, set.id, Object.fromEntries(set.cards.map((card) => [card, id])));
     }
     this.settleRatings(room);
-    this.broadcast(room);
   }
 }

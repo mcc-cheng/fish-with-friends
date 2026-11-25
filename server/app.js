@@ -19,7 +19,6 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
 };
-const MESSAGES_PER_10S = 80;
 
 async function serveStatic(req, res) {
   const send = (status, body, type = 'text/plain; charset=utf-8') => {
@@ -50,10 +49,12 @@ async function serveStatic(req, res) {
 }
 
 /**
- * @param {object} options  Options for Rooms, plus `ratingsFile`: where Elo
- *   ratings are saved. Without it they last only as long as the process.
+ * @param {object} options  Options for Rooms, plus:
+ *   `ratingsFile`: where Elo ratings are saved. Without it they last only as long as the process.
+ *   `messagesPer10s`: how many messages one connection may send in ten seconds.
+ *     Stepping through bot moves takes one per move, so it has to leave room for quick clicking.
  */
-export function createApp({ ratingsFile = null, ...options } = {}) {
+export function createApp({ ratingsFile = null, messagesPer10s = 200, ...options } = {}) {
   const rooms = new Rooms({ ratings: new Ratings({ file: ratingsFile }), ...options });
   const server = http.createServer(serveStatic);
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 8 * 1024 });
@@ -65,9 +66,9 @@ export function createApp({ ratingsFile = null, ...options } = {}) {
       },
     };
     let alive = true;
-    let budget = MESSAGES_PER_10S;
+    let budget = messagesPer10s;
     const refill = setInterval(() => {
-      budget = MESSAGES_PER_10S;
+      budget = messagesPer10s;
     }, 10_000);
     // Pings notice dead connections and keep idle ones open through proxies.
     const heartbeat = setInterval(() => {
@@ -80,7 +81,11 @@ export function createApp({ ratingsFile = null, ...options } = {}) {
       alive = true;
     });
     ws.on('message', (data, isBinary) => {
-      if (isBinary || budget-- <= 0) return;
+      if (isBinary) return;
+      if (budget-- <= 0) {
+        // Refuse out loud. A client that hears nothing back would wait for ever on an answer to its click.
+        return conn.send({ t: 'error', message: 'You’re going too fast. Give it a few seconds.' });
+      }
       try {
         rooms.handle(conn, JSON.parse(data.toString()));
       } catch (error) {

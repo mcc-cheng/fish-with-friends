@@ -1185,8 +1185,41 @@ input[type='text']::placeholder {
 /* ---- what just happened ---- */
 
 .banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
   padding: 14px 16px;
   border-left: 4px solid var(--line);
+}
+
+.banner-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* "Next" lets a waiting bot make its move. It is pinned to the top of the
+   announcement so it doesn't shift when the text beside it grows. */
+.next-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+}
+
+.key-hint {
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, currentColor 40%, transparent);
+  border-radius: 5px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  opacity: 0.8;
+}
+
+@media (hover: none) {
+  .key-hint {
+    display: none; /* no keyboard on a touch screen */
+  }
 }
 
 .banner.good {
@@ -1605,12 +1638,20 @@ input[type='text']::placeholder {
     order: 2;
   }
 
+  /* While stepping through bot moves, the announcement and its Next button stay in reach as you scroll your hand. */
+  .banner.stepping {
+    position: sticky;
+    top: 8px;
+    z-index: 5;
+    box-shadow: 0 -10px 0 var(--bg), 0 8px 24px rgb(0 0 0 / 0.22);
+  }
+
   .action.mine.asking {
     position: sticky;
     bottom: 8px;
     z-index: 5;
     padding: 12px 14px;
-    box-shadow: 0 -8px 24px rgb(0 0 0 / 0.22);
+    box-shadow: 0 10px 0 var(--bg), 0 -8px 24px rgb(0 0 0 / 0.22);
   }
 }
 
