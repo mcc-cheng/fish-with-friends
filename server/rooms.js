@@ -8,12 +8,17 @@ import { randomUUID } from 'node:crypto';
 import { sortCards } from '../shared/cards.js';
 import { chooseMove } from './bot.js';
 import { ask, createGame, declare, otherTeam, shuffle } from './game.js';
+import { History } from './history.js';
 import { Ratings, playerId } from './ratings.js';
 
 export const TEAM_MIN = 2;
 export const TEAM_MAX = 4;
 const ROOM_MAX = 16; // players plus spectators
 const LOG_MAX = 300; // events sent to clients
+const LOBBY_GAMES_MAX = 50; // rooms listed in the lobby
+const CHAT_MAX = 100; // lobby chat messages kept for people who arrive later
+const CHAT_LENGTH = 240;
+const CHAT_GAP_MS = 700; // the least time between one person's messages
 const CODE_LETTERS = 'BCDFGHJKLMNPQRSTVWXZ'; // no vowels, so codes never spell words
 const BOT_NAMES = ['Guppy', 'Minnow', 'Tetra', 'Koi', 'Pike', 'Trout', 'Perch', 'Bass'];
 // The first value of each setting is its default.
@@ -37,6 +42,13 @@ function uniqueName(room, name) {
   }
 }
 
+/** A colour for a name: a hue on the wheel that is always the same for the same player. */
+function hueOf(key) {
+  let hash = 0;
+  for (const char of String(key)) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash % 360;
+}
+
 function timer(fn, ms) {
   const t = setTimeout(fn, ms);
   t.unref?.();
@@ -47,10 +59,16 @@ export class Rooms {
   constructor(options = {}) {
     this.rooms = new Map();
     this.ratings = options.ratings ?? new Ratings();
+    this.history = options.history ?? new History();
+    this.conns = new Set(); // every connection that has sent us anything
+    this.chat = []; // recent lobby chat
+    this.chatSeq = 0;
+    this.lobbyTimer = null;
     this.options = {
       botDelay: [1200, 2200], // ms a bot "thinks" before moving: [min, max]
       graceMs: 30_000, // how long a dropped connection keeps its place before others move on
       emptyTtlMs: 20 * 60_000, // how long a room with nobody connected survives
+      lobbyDelayMs: 150, // lobby updates are batched over this long
       maxRooms: 1000,
       rng: Math.random,
       ...options,
@@ -61,10 +79,20 @@ export class Rooms {
 
   handle(conn, msg) {
     if (!msg || typeof msg.t !== 'string') return;
+    this.conns.add(conn); // anyone who talks to us is online, and hears about the lobby while they are in it
     // Any message may carry the browser's player secret; it decides whose rating this connection plays for.
     if ('player' in msg) conn.pid = playerId(msg.player);
+    if (typeof msg.name === 'string') conn.name = cleanName(msg.name);
     if (msg.t === 'hello') {
-      return conn.send({ t: 'ratings', me: conn.pid ? this.ratings.profile(conn.pid) : null, top: this.ratings.leaderboard(20, conn.pid) });
+      // A client says hello when it connects and whenever it comes back to the lobby.
+      conn.send({ t: 'ratings', me: conn.pid ? this.ratings.profile(conn.pid) : null, top: this.ratings.leaderboard(20, conn.pid) });
+      if (!conn.room) conn.send(this.lobbyView(conn, { chat: true }));
+      return this.touchLobby();
+    }
+    if (msg.t === 'chat') return this.say(conn, msg);
+    if (msg.t === 'profile') {
+      const mine = conn.pid ? this.history.forPlayer(conn.pid) : { stats: null, games: [] };
+      return conn.send({ t: 'profile', me: conn.pid ? this.ratings.profile(conn.pid) : null, ...mine });
     }
     if (msg.t === 'create') return this.create(conn, msg);
     if (msg.t === 'join') return this.join(conn, msg);
@@ -77,11 +105,70 @@ export class Rooms {
   }
 
   disconnect(conn) {
+    this.conns.delete(conn);
     this.drop(conn, false);
+    this.touchLobby();
   }
 
   close() {
     for (const room of [...this.rooms.values()]) this.destroy(room);
+    clearTimeout(this.lobbyTimer);
+  }
+
+  // ---- the lobby: the list of games, who is around, and a chat ----
+
+  /** One row of the lobby's list of games. */
+  listing(room) {
+    const host = room.members.get(room.hostId);
+    return {
+      code: room.code,
+      host: host?.name ?? 'Nobody',
+      hue: hueOf(host?.pid ?? room.code),
+      players: [...room.members.values()].filter((m) => m.team).length,
+      deck: room.settings.deck,
+      status: room.game ? room.game.phase : 'waiting', // waiting | playing | finished
+      private: !room.public,
+      createdAt: room.createdAt,
+    };
+  }
+
+  /** What one person in the lobby sees: public games with someone in them, and every game they are part of. */
+  lobbyView(conn, { chat = false } = {}) {
+    const rooms = [...this.rooms.values()].sort((a, b) => b.createdAt - a.createdAt);
+    const someoneHere = (room) => [...room.members.values()].some((m) => m.connected && !m.isBot);
+    const mine = (room) => conn.pid && [...room.members.values()].some((m) => m.pid === conn.pid);
+    return {
+      t: 'lobby',
+      games: rooms.filter((room) => room.public && someoneHere(room)).slice(0, LOBBY_GAMES_MAX).map((room) => this.listing(room)),
+      yours: rooms.filter(mine).slice(0, LOBBY_GAMES_MAX).map((room) => this.listing(room)),
+      online: new Set([...this.conns].map((c) => c.pid ?? c)).size,
+      played: this.history.count,
+      me: conn.pid ? this.ratings.profile(conn.pid) : null,
+      top: this.ratings.leaderboard(20, conn.pid),
+      chat: chat ? this.chat : undefined,
+    };
+  }
+
+  /** Something the lobby shows has changed: tell everyone there, a moment later, so a burst of changes is one update. */
+  touchLobby() {
+    if (this.lobbyTimer) return;
+    this.lobbyTimer = timer(() => {
+      this.lobbyTimer = null;
+      for (const conn of this.conns) if (!conn.room) conn.send(this.lobbyView(conn));
+    }, this.options.lobbyDelayMs);
+  }
+
+  say(conn, msg) {
+    if (conn.room) return conn.send({ t: 'error', message: 'The chat is in the lobby.' });
+    const text = String(msg.text ?? '').replace(/\s+/g, ' ').trim().slice(0, CHAT_LENGTH);
+    if (!text) return;
+    const now = Date.now();
+    if (now - (conn.lastChat ?? 0) < CHAT_GAP_MS) return conn.send({ t: 'error', message: 'One message at a time. Give it a second.' });
+    conn.lastChat = now;
+    const message = { id: ++this.chatSeq, name: conn.name ?? 'Guest', hue: hueOf(conn.pid ?? `guest${this.chatSeq}`), text, at: now };
+    this.chat.push(message);
+    if (this.chat.length > CHAT_MAX) this.chat.shift();
+    for (const other of this.conns) if (!other.room) other.send({ t: 'chat', message });
   }
 
   // ---- joining and leaving ----
@@ -99,6 +186,8 @@ export class Rooms {
       code,
       members: new Map(),
       nextId: 1,
+      createdAt: Date.now(),
+      public: msg.public !== false, // public rooms are listed in the lobby; private ones need the link
       hostId: null,
       settings: Object.fromEntries(Object.entries(SETTING_VALUES).map(([key, values]) => [key, values[0]])),
       game: null,
@@ -120,6 +209,8 @@ export class Rooms {
     if (!room) return conn.send({ t: 'error', code: 'no-room', message: "That room doesn't exist any more." });
     // A token from an earlier connection puts the player back in their old place.
     let member = typeof msg.token === 'string' ? [...room.members.values()].find((m) => m.token === msg.token) : null;
+    // No token (a new tab, or the session was lost): the same browser gets back the place it left empty.
+    if (!member && conn.pid) member = [...room.members.values()].find((m) => m.pid === conn.pid && !m.connected && !m.isBot) ?? null;
     if (conn.room && conn.member !== member) this.drop(conn, true);
     if (!member) {
       if (room.members.size >= ROOM_MAX) return conn.send({ t: 'error', message: 'That room is full.' });
@@ -207,6 +298,7 @@ export class Rooms {
       if (member.conn) member.conn.room = member.conn.member = null;
     }
     this.rooms.delete(room.code);
+    this.touchLobby();
   }
 
   /** Hands the host role on once the host has really gone. */
@@ -305,7 +397,9 @@ export class Rooms {
         // Ratings go to whoever sat down at the start, even if they leave or someone takes over their seat.
         room.rating = {
           unrated: this.unratedReason(room),
-          players: [...a, ...b].map((m) => ({ pid: m.pid, name: m.name, team: m.team })),
+          players: [...a, ...b].map((m) => ({ pid: m.pid, name: m.name, team: m.team, bot: m.isBot })),
+          startedAt: Date.now(),
+          recorded: false,
           changes: null,
         };
         room.game = createGame({
@@ -322,7 +416,7 @@ export class Rooms {
         if (!this.seated(room, me)) return 'You are watching this game.';
         const result = ask(game, me.id, msg.target, msg.card);
         if (!result.ok) return result.error;
-        this.settleRatings(room);
+        this.settleGame(room);
         return;
       }
 
@@ -331,7 +425,7 @@ export class Rooms {
         if (!this.seated(room, me)) return 'You are watching this game.';
         const result = declare(game, me.id, msg.set, msg.assignment);
         if (!result.ok) return result.error;
-        this.settleRatings(room);
+        this.settleGame(room);
         return;
       }
 
@@ -401,6 +495,7 @@ export class Rooms {
     const log = this.visibleLog(room);
     for (const member of room.members.values()) member.conn?.send(this.view(room, member, log));
     this.scheduleBot(room);
+    this.touchLobby();
   }
 
   visibleLog(room) {
@@ -421,6 +516,7 @@ export class Rooms {
     return {
       t: 'state',
       code: room.code,
+      public: room.public,
       phase: game ? game.phase : 'lobby',
       hostId: room.hostId,
       you: member.id,
@@ -469,19 +565,34 @@ export class Rooms {
     return null;
   }
 
-  /** Once a rated game has finished, moves the ratings. Safe to call after every move. */
-  settleRatings(room) {
+  /**
+   * Once a game has finished: moves the ratings if it was a rated one, and adds
+   * it to the history either way. Safe to call after every move.
+   */
+  settleGame(room) {
     const { game, rating } = room;
-    if (game?.phase !== 'finished' || !rating || rating.unrated || rating.changes) return;
-    if (game.winner !== 'A' && game.winner !== 'B') {
-      rating.changes = [];
-      return;
+    if (game?.phase !== 'finished' || !rating || rating.recorded) return;
+    rating.recorded = true;
+    if (!rating.unrated) {
+      const side = (team) => rating.players.filter((p) => p.team === team).map((p) => ({ id: p.pid, name: p.name }));
+      const teamOf = new Map(rating.players.map((p) => [p.pid, p.team]));
+      rating.changes = this.ratings
+        .recordGame({ winners: side(game.winner), losers: side(otherTeam(game.winner)) })
+        .map((change) => ({ ...change, team: teamOf.get(change.id) }));
     }
-    const side = (team) => rating.players.filter((p) => p.team === team).map((p) => ({ id: p.pid, name: p.name }));
-    const teamOf = new Map(rating.players.map((p) => [p.pid, p.team]));
-    rating.changes = this.ratings
-      .recordGame({ winners: side(game.winner), losers: side(otherTeam(game.winner)) })
-      .map((change) => ({ ...change, team: teamOf.get(change.id) }));
+    const changeOf = new Map((rating.changes ?? []).map((change) => [change.id, change]));
+    this.history.add({
+      startedAt: rating.startedAt,
+      endedAt: Date.now(),
+      deck: game.deck,
+      score: { ...game.score },
+      winner: game.winner,
+      rated: !rating.unrated,
+      players: rating.players.map((p) => {
+        const change = changeOf.get(p.pid);
+        return change ? { ...p, delta: change.delta, after: change.after } : p;
+      }),
+    });
   }
 
   // ---- bots ----
@@ -535,6 +646,6 @@ export class Rooms {
       const set = game.sets.find((s) => !s.claimedBy);
       declare(game, id, set.id, Object.fromEntries(set.cards.map((card) => [card, id])));
     }
-    this.settleRatings(room);
+    this.settleGame(room);
   }
 }

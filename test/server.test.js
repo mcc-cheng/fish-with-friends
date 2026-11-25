@@ -13,7 +13,7 @@ before(async () => {
   // Bots move instantly and the grace period is short so the tests run fast. The tests
   // also click far faster than a person could, so the message limit is lifted here
   // and checked on its own below.
-  app = createApp({ botDelay: [0, 0], graceMs: 150, messagesPer10s: 100_000 });
+  app = createApp({ botDelay: [0, 0], graceMs: 150, lobbyDelayMs: 5, messagesPer10s: 100_000 });
   port = await app.listen(0, '127.0.0.1');
 });
 
@@ -105,6 +105,10 @@ test('serves the client and room links', async () => {
   assert.equal(home.status, 200);
   assert.match(await home.text(), /<div id="app">/);
   assert.equal((await get('/BCDF')).status, 200);
+  assert.equal((await get('/bcdf')).status, 200);
+  assert.equal((await get('/help')).status, 200);
+  assert.equal((await get('/profile')).status, 200);
+  assert.equal((await get('/nope')).status, 404, 'four letters with a vowel is not a game code');
   assert.match((await get('/shared/cards.js')).headers.get('content-type'), /javascript/);
   assert.equal((await get('/nope.js')).status, 404);
   assert.equal((await get('/shared/%2e%2e/package.json')).status, 404);
@@ -398,7 +402,9 @@ async function playToEnd(clients) {
     const seen = await humanToMove(clients[0]);
     if (seen.phase !== 'playing') return seen;
     const mover = byId.get(seen.game.turn);
-    const state = await humanToMove(mover);
+    // The mover's own connection can be a message behind the first client's: wait for it to catch up.
+    let state = await mover.state(() => true, { fresh: false });
+    while (!state.game || state.game.position < seen.game.position) state = await mover.state(() => true);
     if (state.phase !== 'playing' || state.game.turn !== state.you) continue;
     const open = buildSets(state.game.deck).find((set) => !state.game.sets.find((s) => s.id === set.id).claimedBy);
     const reply = await mover.act(
@@ -510,13 +516,191 @@ test('a connection that sends too much is told so, never just ignored', async ()
         if (replies.length === 8) resolve();
       });
     });
-    for (let i = 0; i < 8; i++) ws.send(JSON.stringify({ t: 'hello' }));
+    for (let i = 0; i < 8; i++) ws.send(JSON.stringify({ t: 'profile' }));
     await done;
     // Every message gets an answer: five are served, and the rest are refused in words.
-    assert.deepEqual(replies.map((m) => m.t), ['ratings', 'ratings', 'ratings', 'ratings', 'ratings', 'error', 'error', 'error']);
+    assert.deepEqual(replies.map((m) => m.t), ['profile', 'profile', 'profile', 'profile', 'profile', 'error', 'error', 'error']);
     assert.match(replies.at(-1).message, /too fast/);
   } finally {
     ws.terminate();
     await strict.close();
   }
+});
+
+/** Someone sitting in the lobby: connects, says hello, and resolves with the client and the first lobby snapshot. */
+async function enterLobby(name, player) {
+  const client = await connect();
+  const first = client.next((m) => m.t === 'lobby');
+  client.send({ t: 'hello', name, player });
+  return { client, lobby: await first };
+}
+
+const lobbyWith = (client, match) => client.next((m) => m.t === 'lobby' && match(m), { fresh: false });
+
+test('the lobby lists public games as they change, and keeps private ones to their players', async () => {
+  const { client: watcher, lobby } = await enterLobby('Watcher', secret());
+  assert.ok(Array.isArray(lobby.games) && Array.isArray(lobby.chat));
+  assert.ok(lobby.online >= 1);
+
+  // A public game appears for everyone in the lobby...
+  const bobKey = secret();
+  const { host: bob, code } = await createRoom('Bob', bobKey);
+  const row = (m, c = code) => m.games.find((g) => g.code === c);
+  let seen = await lobbyWith(watcher, (m) => row(m));
+  const { createdAt, hue, ...rest } = row(seen);
+  assert.deepEqual(rest, { code, host: 'Bob', players: 1, deck: 54, status: 'waiting', private: false });
+  assert.ok(Date.now() - createdAt < 5000 && hue >= 0 && hue < 360);
+
+  // ...and follows it: more players, a different deck, the game starting.
+  await bob.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 2);
+  await bob.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 3);
+  await bob.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  await bob.act({ t: 'settings', settings: { deck: 72 } }, (s) => s.settings.deck === 72);
+  seen = await lobbyWith(watcher, (m) => row(m)?.players === 4 && row(m).deck === 72);
+  bob.send({ t: 'start' });
+  seen = await lobbyWith(watcher, (m) => row(m)?.status === 'playing');
+
+  // A private game is listed only for the people in it, under "your games".
+  const carolKey = secret();
+  const carol = await connect();
+  const made = carol.next((m) => m.t === 'joined');
+  carol.send({ t: 'create', name: 'Carol', player: carolKey, public: false });
+  const secretCode = (await made).code;
+  const carolState = await carol.state(() => true, { fresh: false });
+  assert.equal(carolState.public, false);
+  await pause(40);
+  const latest = await watcher.next((m) => m.t === 'lobby', { fresh: false });
+  assert.equal(row(latest, secretCode), undefined);
+  assert.equal(latest.yours.length, 0);
+  const { lobby: carolsLobby } = await enterLobby('Carol', carolKey); // Carol's second tab
+  assert.equal(row(carolsLobby, secretCode), undefined);
+  assert.deepEqual(carolsLobby.yours.map((g) => [g.code, g.private]), [[secretCode, true]]);
+
+  // When everyone has left a game it drops off the list.
+  bob.send({ t: 'leave' });
+  await lobbyWith(watcher, (m) => !row(m));
+  // Bob is back in the lobby himself now, and it is still one of his games.
+  const bobsLobby = await bob.next((m) => m.t === 'lobby' && m.yours.some((g) => g.code === code));
+  assert.equal(bobsLobby.yours.find((g) => g.code === code).status, 'playing');
+});
+
+test('lobby chat reaches the people in the lobby, with a backlog for newcomers', async () => {
+  const { client: ann } = await enterLobby('Ann', secret());
+  const { client: ben } = await enterLobby('Ben', secret());
+  const { host: inGame } = await createRoom('Busy', secret());
+
+  const heardByBen = ben.next((m) => m.t === 'chat');
+  const heardByAnn = ann.next((m) => m.t === 'chat');
+  ann.send({ t: 'chat', text: '  anyone   for a game?  ' });
+  const message = await heardByBen;
+  assert.equal(message.message.text, 'anyone for a game?');
+  assert.equal(message.message.name, 'Ann');
+  assert.deepEqual((await heardByAnn).message, message.message);
+  assert.ok(message.message.hue >= 0 && message.message.hue < 360 && message.message.at <= Date.now());
+
+  // Too fast, empty, or sent from inside a game: nothing is posted.
+  assert.match((await ann.fails({ t: 'chat', text: 'and again' })).message, /One message at a time/);
+  ben.send({ t: 'chat', text: '   ' });
+  assert.match((await inGame.fails({ t: 'chat', text: 'hello from a game' })).message, /lobby/);
+  // Long messages are cut, and a renamed player speaks under the new name.
+  const long = ann.next((m) => m.t === 'chat' && m.message.name === 'Benedict');
+  ben.send({ t: 'chat', name: 'Benedict', text: 'x'.repeat(500) });
+  assert.equal((await long).message.text.length, 240);
+
+  // Someone arriving later gets what was said. People in a game heard none of it.
+  const { lobby } = await enterLobby('Late', secret());
+  assert.deepEqual(lobby.chat.slice(-2).map((m) => [m.name, m.text.slice(0, 18)]), [['Ann', 'anyone for a game?'], ['Benedict', 'x'.repeat(18)]]);
+  await pause(30);
+  assert.equal(await Promise.race([inGame.next((m) => m.t === 'chat', { fresh: false }), pause(20).then(() => 'nothing')]), 'nothing');
+});
+
+test('a profile holds the player’s games and totals, rated or not', async () => {
+  const ada = secret();
+  const grace = secret();
+  const { client: watcher, lobby } = await enterLobby('Watcher');
+  const profileOf = async (client, player) => {
+    const reply = client.next((m) => m.t === 'profile');
+    client.send({ t: 'profile', player });
+    return reply;
+  };
+  assert.deepEqual(await profileOf(watcher), { t: 'profile', me: null, stats: null, games: [] });
+
+  // A rated game: Ada and a bot against Grace and a bot.
+  const { host, code } = await createRoom('Ada', ada);
+  const { client: guest } = await joinRoom(code, 'Grace', undefined, grace);
+  await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 3);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  const started = guest.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  await started;
+  const end = await playToEnd([host, guest]);
+  const adaWon = end.game.winner === 'A';
+
+  let mine = await profileOf(host, ada);
+  assert.deepEqual(mine.stats, { games: 1, wins: adaWon ? 1 : 0, losses: adaWon ? 0 : 1, rated: 1 });
+  assert.equal(mine.me.rating, adaWon ? 1016 : 984);
+  const [game] = mine.games;
+  assert.deepEqual(
+    // (seats are shuffled, so the order of names isn't fixed)
+    { ...game, endedAt: null, minutes: null, foes: [...game.foes].sort() },
+    {
+      endedAt: null,
+      minutes: null,
+      deck: 54,
+      rated: true,
+      won: adaWon,
+      score: [end.game.score.A, end.game.score.B],
+      mates: ['Guppy'],
+      foes: ['Grace', 'Minnow'],
+      delta: adaWon ? 16 : -16,
+      after: adaWon ? 1016 : 984,
+    },
+  );
+  assert.ok(Date.now() - game.endedAt < 5000 && game.minutes >= 1);
+  const theirs = await profileOf(guest, grace);
+  assert.deepEqual([theirs.games[0].won, theirs.games[0].score, theirs.games[0].mates], [!adaWon, [end.game.score.B, end.game.score.A], ['Minnow']]);
+
+  // The lobby's count of games played went up.
+  const after = await lobbyWith(watcher, (m) => m.played > lobby.played);
+  assert.equal(after.played, lobby.played + 1);
+
+  // A practice game (Ada alone with bots) is remembered too, but moves no rating.
+  await host.act({ t: 'toLobby' }, (s) => s.phase === 'lobby');
+  guest.send({ t: 'leave' });
+  await host.state((s) => s.members.length === 3);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  const again = host.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  await again;
+  await playToEnd([host]);
+  mine = await profileOf(host, ada);
+  assert.deepEqual([mine.stats.games, mine.stats.rated, mine.games.length], [2, 1, 2]);
+  assert.deepEqual([mine.games[0].rated, mine.games[0].delta, mine.games[0].after], [false, null, null]);
+  assert.equal(mine.me.games, 1, 'the rating still counts one rated game');
+});
+
+test('the same browser gets its seat back in a new tab, without a session token', async () => {
+  const key = secret();
+  const { host, code } = await createRoom('Ada');
+  const { client: guest, reply } = await joinRoom(code, 'Grace', undefined, key);
+  await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 3);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  const started = guest.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  const hand = (await started).game.hand;
+
+  // While Grace's first tab is connected, a second tab is somebody new (here, a spectator)...
+  const { client: second, reply: other } = await joinRoom(code, 'Grace', undefined, key);
+  assert.notEqual(other.id, reply.id);
+  await second.close();
+
+  // ...but once she has dropped out, coming back from the same browser is coming back to her seat.
+  const gone = host.state((s) => s.members.some((m) => m.id === reply.id && !m.online));
+  await guest.close();
+  await gone;
+  const { client: back, reply: again } = await joinRoom(code, 'Grace', undefined, key);
+  assert.equal(again.id, reply.id);
+  const restored = await back.state(() => true, { fresh: false });
+  assert.deepEqual(restored.game.hand, hand, 'and to the cards she was holding');
+  assert.equal(restored.members.find((m) => m.id === reply.id).online, true);
 });

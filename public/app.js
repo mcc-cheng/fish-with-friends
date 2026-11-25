@@ -90,6 +90,16 @@ function playerKey() {
 
 const PLAYER = playerKey();
 
+/** The name other players see. A new browser gets a placeholder, which can be changed on the profile page. */
+function playerName() {
+  let name = load(localStorage, 'fish:name');
+  if (!name) {
+    name = `Guest ${1000 + Math.floor(Math.random() * 9000)}`;
+    save(localStorage, 'fish:name', name);
+  }
+  return name;
+}
+
 // ---------------------------------------------------------------- theme
 // index.html sets <html data-theme> before the first paint: the saved choice, or else the system's.
 
@@ -121,13 +131,23 @@ function themeButton() {
 
 // ---------------------------------------------------------------- state
 
+// Room codes have no vowels, so a page like "/help" is never mistaken for one.
+const ROOM_PATH = /^\/([BCDFGHJKLMNPQRSTVWXZ]{4})$/i;
+const PAGES = { '/help': 'help', '/profile': 'profile' };
+
 const state = {
   status: 'connecting', // connecting | open | closed
   view: null, // the latest room state from the server
-  code: (location.pathname.match(/^\/([A-Za-z]{4})$/)?.[1] ?? '').toUpperCase() || null,
-  joining: false,
+  code: (location.pathname.match(ROOM_PATH)?.[1] ?? '').toUpperCase() || null, // the room we are in, or on our way into
+  page: PAGES[location.pathname] ?? 'lobby', // the screen to show when not in a room: lobby | help | profile
+  name: playerName(),
   busy: false,
-  nameDraft: load(localStorage, 'fish:name') ?? '',
+  lobby: null, // { games, yours, online, played }: what the lobby lists
+  lobbyTab: 'games', // games | yours | top
+  chat: [], // lobby chat messages
+  chatDraft: '',
+  profile: null, // { me, stats, games }: this player's record, once asked for
+  nameDraft: null, // the name being edited on the profile page
   codeDraft: '',
   tab: 'ask',
   askCard: null,
@@ -140,7 +160,6 @@ const state = {
   toast: null,
   flashed: 0,
 };
-state.joining = Boolean(state.code && loadSession(state.code));
 
 // ---------------------------------------------------------------- network
 
@@ -154,17 +173,16 @@ function connect() {
   ws.onopen = () => {
     retries = 0;
     state.status = 'open';
-    send({ t: 'hello', player: PLAYER }); // says who we are and fetches the leaderboard
-    const session = state.code && loadSession(state.code);
-    state.joining = Boolean(session) && !state.view;
-    if (session) send({ t: 'join', code: state.code, name: session.name, token: session.token, player: PLAYER });
+    send({ t: 'hello', player: PLAYER, name: state.name }); // says who we are; the answer is the lobby
+    // A room link, or a room we were in before the connection dropped: go (back) in.
+    if (state.code) send({ t: 'join', code: state.code, name: state.name, token: loadSession(state.code)?.token, player: PLAYER });
+    else if (state.page === 'profile') send({ t: 'profile' });
     render();
   };
   ws.onmessage = (event) => receive(JSON.parse(event.data));
   ws.onclose = () => {
     state.status = 'closed';
     state.busy = false;
-    state.joining = false;
     render();
     setTimeout(connect, Math.min(5000, 400 * 2 ** retries++));
   };
@@ -183,8 +201,8 @@ function receive(msg) {
   switch (msg.t) {
     case 'joined':
       state.code = msg.code;
-      save(sessionStorage, sessionKey(msg.code), JSON.stringify({ token: msg.token, name: state.nameDraft }));
-      if (location.pathname !== `/${msg.code}`) history.replaceState(null, '', `/${msg.code}`);
+      save(sessionStorage, sessionKey(msg.code), JSON.stringify({ token: msg.token }));
+      if (location.pathname !== `/${msg.code}`) history.pushState(null, '', `/${msg.code}`);
       break;
     case 'state': {
       // Anything in the new hand that wasn't in the old one was just dealt or won.
@@ -192,16 +210,25 @@ function receive(msg) {
       state.fresh = new Set(before && msg.game ? msg.game.hand.filter((card) => !before.includes(card)) : []);
       state.view = msg;
       state.busy = false;
-      state.joining = false;
       reconcile();
       break;
     }
     case 'ratings':
       state.ratings = { me: msg.me, top: msg.top };
       break;
+    case 'lobby':
+      state.lobby = { games: msg.games, yours: msg.yours, online: msg.online, played: msg.played };
+      state.ratings = { me: msg.me, top: msg.top };
+      if (msg.chat) state.chat = msg.chat;
+      break;
+    case 'chat':
+      state.chat = [...state.chat, msg.message].slice(-200);
+      break;
+    case 'profile':
+      state.profile = { me: msg.me, stats: msg.stats, games: msg.games };
+      break;
     case 'error':
       state.busy = false;
-      state.joining = false;
       if (msg.code === 'no-room') exitRoom();
       toast(msg.message, 'bad');
       break;
@@ -220,11 +247,11 @@ function receive(msg) {
 
 function exitRoom() {
   if (state.code) save(sessionStorage, sessionKey(state.code), null);
-  Object.assign(state, { view: null, code: null, busy: false });
+  Object.assign(state, { view: null, code: null, busy: false, page: 'lobby' });
   resetMoves();
   if (location.pathname !== '/') history.replaceState(null, '', '/');
-  // Back on the home screen: the leaderboard may have moved while we played.
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'hello', player: PLAYER }));
+  // Back in the lobby: ask for it afresh, since nothing about it was sent while we were in a room.
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'hello', player: PLAYER, name: state.name }));
 }
 
 function toast(text, kind = 'info') {
@@ -239,33 +266,45 @@ function toast(text, kind = 'info') {
 
 // ---------------------------------------------------------------- actions
 
-function rememberName() {
-  const name = state.nameDraft.trim();
-  if (!name) {
-    toast('Enter your name first.', 'bad');
-    document.querySelector('[data-focus="name"]')?.focus();
-    return null;
+/** Starts a new room and goes into it. Public rooms are listed in the lobby; private ones need the link. */
+function createGame(isPublic) {
+  send({ t: 'create', name: state.name, player: PLAYER, public: isPublic });
+}
+
+/** Goes into a room. If it turns out not to exist, the server says so and we land back in the lobby. */
+function enterRoom(code) {
+  state.code = code;
+  send({ t: 'join', code, name: state.name, token: loadSession(code)?.token, player: PLAYER });
+  render();
+}
+
+function joinByCode(event) {
+  event.preventDefault();
+  const code = state.codeDraft.trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(code)) return toast('Game codes are four letters.', 'bad');
+  state.codeDraft = '';
+  enterRoom(code);
+}
+
+function sendChat(event) {
+  event.preventDefault();
+  const input = event.target.elements.text;
+  if (!input.value.trim()) return;
+  if (send({ t: 'chat', text: input.value, name: state.name })) {
+    input.value = '';
+    state.chatDraft = '';
   }
+}
+
+function saveName(event) {
+  event.preventDefault();
+  const name = (state.nameDraft ?? state.name).replace(/\s+/g, ' ').trim().slice(0, 20);
+  if (!name) return toast('Enter a name.', 'bad');
+  state.name = name;
+  state.nameDraft = null;
   save(localStorage, 'fish:name', name);
-  return name;
-}
-
-function createRoom(event) {
-  event.preventDefault();
-  const name = rememberName();
-  if (name) send({ t: 'create', name, player: PLAYER });
-}
-
-function joinRoom(event) {
-  event.preventDefault();
-  const code = (state.code ?? state.codeDraft).trim().toUpperCase();
-  if (!/^[A-Z]{4}$/.test(code)) {
-    toast('Room codes are four letters.', 'bad');
-    document.querySelector('[data-focus="code"]')?.focus();
-    return;
-  }
-  const name = rememberName();
-  if (name) send({ t: 'join', code, name, player: PLAYER });
+  send({ t: 'hello', player: PLAYER, name }); // so the chat and new games use it straight away
+  toast('Name saved.');
 }
 
 function leaveRoom() {
@@ -397,7 +436,12 @@ function morph(from, to) {
 
 function render() {
   const root = document.getElementById('app');
+  // Keep the chat scrolled to the latest message, unless the reader has scrolled up to look back.
+  const chat = root.querySelector('.chat-list');
+  const atEnd = !chat || chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60;
   morph(root, h('div', { id: 'app' }, screen(), statusBar(), toastEl()));
+  const chatNow = root.querySelector('.chat-list');
+  if (chatNow && atEnd) chatNow.scrollTop = chatNow.scrollHeight;
 
   const game = state.view?.game;
   document.title = game?.turn && game.turn === state.view.you ? 'Your turn · Fish' : 'Fish with Friends';
@@ -412,9 +456,11 @@ function render() {
 }
 
 function screen() {
-  if (state.view) return state.view.phase === 'lobby' ? lobbyScreen() : gameScreen();
-  if (state.joining) return h('main', { class: 'home' }, h('p', { class: 'muted center' }, 'Rejoining your room…'));
-  return homeScreen();
+  if (state.view) return state.view.phase === 'lobby' ? setupScreen() : gameScreen();
+  if (state.code) return h('div', { class: 'page' }, topbar(), h('main', { class: 'notice' }, h('p', { class: 'muted' }, 'Joining the game…')));
+  if (state.page === 'help') return helpScreen();
+  if (state.page === 'profile') return profileScreen();
+  return lobbyScreen();
 }
 
 function statusBar() {
@@ -469,71 +515,108 @@ function tag(text, kind = '') {
   return h('span', { class: `tag ${kind}` }, text);
 }
 
-function rules() {
+/** A player's name in their own colour: the same hue every time, picked by the server. */
+function coloured(name, hue) {
+  return h('span', { class: 'name', style: `--hue: ${hue}` }, name);
+}
+
+/** "3 minutes ago". The clock is the browser's, so anything in the future counts as now. */
+function ago(time) {
+  const minutes = Math.floor((Date.now() - time) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} ${days === 1 ? 'day' : 'days'} ago`;
+}
+
+const deckName = (deck) => (deck === 72 ? 'Sets of eight' : 'Sets of six');
+
+// ---- the bar across the top of every screen
+
+function topbar() {
+  const v = state.view;
+  const isHost = v && v.hostId === v.you;
+  // From inside a room, other pages open in a new tab, so the game stays where it is.
+  const away = v ? { target: '_blank', rel: 'noopener' } : {};
   return h(
-    'details',
-    { class: 'rules' },
-    h('summary', {}, 'How to play'),
-    h(
-      'ul',
-      {},
-      h('li', {}, 'Two teams. The deck is split into nine ', h('strong', {}, 'sets'), ': the low cards and the high cards of each suit, plus the four 8s with the jokers.'),
-      h('li', {}, 'On your turn, ', h('strong', {}, 'ask'), ' one opponent for one exact card. You must already hold a card from the same set, and you can’t ask for a card you have.'),
-      h('li', {}, 'If they have it, they hand it over and you go again. If not, the turn passes to them.'),
-      h('li', {}, 'When you think your team holds a whole set, ', h('strong', {}, 'declare'), ' it by saying which teammate has each card. All right and your team wins the set; any mistake and the other team gets it.'),
-      h('li', {}, 'No table talk about cards. The team with the most sets wins.'),
-      h('li', {}, 'Games with a human player on each team are ', h('strong', {}, 'rated'), ': the winners take Elo points from the losers, more for an upset.'),
-    ),
+    'header',
+    { class: cls('topbar', v && 'in-room') },
+    v ? h('span', { class: 'brand' }, 'Fish') : h('a', { class: 'brand', href: '/' }, 'Fish with Friends'),
+    v
+      ? h('button', { class: 'room-pill', title: 'Copy the invite link', onclick: copyLink }, 'Game ', h('strong', {}, v.code), h('span', { class: 'copy' }, 'Copy link'))
+      : null,
+    h('span', { class: 'spacer' }),
+    isHost && v.phase === 'playing'
+      ? h('button', { class: 'btn quiet', onclick: () => confirm('End this game for everyone and go back to choosing teams?') && send({ t: 'toLobby' }) }, 'End game')
+      : null,
+    v ? h('button', { class: 'btn quiet', onclick: leaveRoom }, 'Leave') : null,
+    h('a', { class: 'me', href: '/profile', title: 'Your profile: your games and statistics', ...away }, state.name),
+    h('a', { class: 'icon-btn', href: '/help', title: 'Help: how to play', 'aria-label': 'Help: how to play', ...away }, '?'),
+    themeButton(),
   );
 }
 
-// ---- home
+// ---- lobby: who is around, the games you can join, and a chat
 
-function homeScreen() {
-  const nameField = h(
-    'label',
-    { class: 'field' },
-    h('span', {}, 'Your name'),
-    h('input', {
-      type: 'text',
-      'data-focus': 'name',
-      maxlength: 20,
-      autocomplete: 'nickname',
-      placeholder: 'What should we call you?',
-      value: state.nameDraft,
-      oninput: (e) => {
-        state.nameDraft = e.target.value;
-      },
-    }),
-  );
-
-  const body = state.code
-    ? h(
-        'form',
-        { class: 'panel stack', onsubmit: joinRoom },
-        h('h2', {}, 'Join room ', h('span', { class: 'code' }, state.code)),
-        nameField,
-        h('button', { class: 'btn primary big', type: 'submit' }, 'Join game'),
-        h('a', { class: 'muted small', href: '/' }, 'Or start a room of your own'),
-      )
-    : h(
-        'div',
-        { class: 'panel stack' },
-        nameField,
-        h('form', { onsubmit: createRoom }, h('button', { class: 'btn primary big', type: 'submit' }, 'Create a room')),
-        h('div', { class: 'divider' }, 'or join a friend’s'),
+function lobbyScreen() {
+  const lobby = state.lobby ?? { games: [], yours: [], online: 0, played: 0 };
+  const tab = state.lobbyTab;
+  const tabs = [
+    ['games', 'Lobby'],
+    ['yours', 'Your games'],
+    ['top', 'Leaderboard'],
+  ];
+  return h(
+    'div',
+    { class: 'page' },
+    topbar(),
+    h(
+      'main',
+      { class: 'lobby' },
+      chatPanel(),
+      h(
+        'section',
+        { class: 'lobby-games' },
+        h(
+          'div',
+          { class: 'lobby-tabs', role: 'tablist' },
+          tabs.map(([id, label]) =>
+            h(
+              'button',
+              {
+                class: 'lobby-tab',
+                role: 'tab',
+                'aria-selected': String(tab === id),
+                onclick: () => {
+                  state.lobbyTab = id;
+                  render();
+                },
+              },
+              label,
+              id === 'yours' && lobby.yours.length ? h('span', { class: 'tab-count' }, lobby.yours.length) : null,
+            ),
+          ),
+        ),
+        h('div', { class: 'panel lobby-table' }, tab === 'top' ? leaderboard() : gamesTable(tab === 'games' ? lobby.games : lobby.yours, tab)),
+      ),
+      h(
+        'aside',
+        { class: 'lobby-side' },
+        h('button', { class: 'btn primary big', onclick: () => createGame(true) }, 'Create a game'),
+        h('button', { class: 'btn big', onclick: () => createGame(false) }, 'New private game'),
         h(
           'form',
-          { class: 'join-row', onsubmit: joinRoom },
+          { class: 'join-row', onsubmit: joinByCode },
           h('input', {
             type: 'text',
-            'data-focus': 'code',
-            'aria-label': 'Room code',
+            'aria-label': 'Game code',
             maxlength: 4,
             autocomplete: 'off',
             autocapitalize: 'characters',
             spellcheck: 'false',
-            placeholder: 'CODE',
+            placeholder: 'Code',
             class: 'code-input',
             value: state.codeDraft,
             oninput: (e) => {
@@ -542,36 +625,89 @@ function homeScreen() {
           }),
           h('button', { class: 'btn', type: 'submit' }, 'Join'),
         ),
-      );
+        h(
+          'p',
+          { class: 'lobby-stats' },
+          h('strong', {}, lobby.online.toLocaleString()),
+          lobby.online === 1 ? ' player online' : ' players online',
+          h('br'),
+          h('strong', {}, lobby.played.toLocaleString()),
+          lobby.played === 1 ? ' game played' : ' games played',
+        ),
+      ),
+    ),
+    h('footer', { class: 'footer' }, h('a', { href: '/help' }, 'Help'), ' · ', h('a', { href: '/profile' }, 'Your profile')),
+  );
+}
 
+function gamesTable(games, tab) {
+  if (games.length === 0) {
+    return h('p', { class: 'muted empty-note' }, tab === 'games' ? 'No open games right now. Create one and it will show up here.' : 'You aren’t in any games at the moment.');
+  }
+  const status = { waiting: 'Open', playing: 'Playing', finished: 'Finished' };
   return h(
-    'main',
-    { class: 'home' },
-    h('div', { class: 'corner' }, themeButton()),
-    h('div', { class: 'fan', 'aria-hidden': 'true' }, ['9S', '10H', 'JD', 'QC', 'KH', 'AS'].map((card, i) => h('span', { class: 'fan-slot', style: `--i: ${i}` }, cardEl(card)))),
-    h('h1', { class: 'logo' }, 'Fish'),
-    h('p', { class: 'tagline' }, 'The team card game of asking, remembering and declaring, also known as Literature. For 4, 6 or 8 players.'),
-    body,
-    leaderboard(),
-    rules(),
+    'table',
+    { class: 'games' },
+    h('thead', {}, h('tr', {}, ['Host', 'Players', 'Deck', 'Status', 'Created'].map((label) => h('th', { scope: 'col' }, label)))),
+    h(
+      'tbody',
+      {},
+      games.map((game) =>
+        // The whole row goes into the game; the host's name is a real link so it works from the keyboard too.
+        h(
+          'tr',
+          { title: game.status === 'waiting' ? 'Join this game' : 'Watch this game', onclick: () => enterRoom(game.code) },
+          h('td', {}, h('a', { class: 'name', style: `--hue: ${game.hue}`, href: `/${game.code}`, onclick: (e) => e.preventDefault() }, game.host), game.private ? tag('private') : null),
+          h('td', {}, game.players),
+          h('td', {}, deckName(game.deck)),
+          h('td', {}, h('span', { class: `status ${game.status}` }, status[game.status])),
+          h('td', { class: 'muted' }, ago(game.createdAt)),
+        ),
+      ),
+    ),
+  );
+}
+
+function chatPanel() {
+  return h(
+    'section',
+    { class: 'panel chat' },
+    h('h2', {}, 'Lobby chat'),
+    h(
+      'ol',
+      { class: 'chat-list', 'aria-live': 'polite' },
+      state.chat.length === 0 ? h('li', { class: 'muted' }, 'Nobody has said anything yet.') : state.chat.map((m) => h('li', {}, coloured(m.name, m.hue), ': ', m.text)),
+    ),
+    h(
+      'form',
+      { class: 'chat-form', onsubmit: sendChat },
+      h('input', {
+        type: 'text',
+        name: 'text',
+        maxlength: 240,
+        autocomplete: 'off',
+        'aria-label': 'Message',
+        placeholder: 'Type a message…',
+        value: state.chatDraft,
+        oninput: (e) => {
+          state.chatDraft = e.target.value;
+        },
+      }),
+    ),
   );
 }
 
 function leaderboard() {
   const { me, top } = state.ratings ?? { me: null, top: [] };
   return h(
-    'section',
-    { class: 'panel board' },
-    h('h2', {}, 'Leaderboard'),
-    me?.games
-      ? h('p', { class: 'board-me' }, 'Your rating is ', h('strong', {}, me.rating), `: rank ${me.rank}, ${me.wins} won and ${me.losses} lost.`)
-      : null,
-    top.length === 0 ? h('p', { class: 'muted small' }, 'No rated games yet. Everyone starts at 1000, and ratings move after each game with a human player on both teams.') : null,
-    PLAYER ? null : h('p', { class: 'muted small' }, 'This browser is blocking storage, so your games here can’t be rated.'),
+    'div',
+    { class: 'board' },
+    me?.games ? h('p', { class: 'board-me' }, 'Your rating is ', h('strong', {}, me.rating), `: rank ${me.rank}, ${me.wins} won and ${me.losses} lost.`) : null,
+    top.length === 0 ? h('p', { class: 'muted' }, 'No rated games yet. Everyone starts at 1000, and ratings move after each game with a human player on both teams.') : null,
     h(
       'ol',
       { class: 'board-list' },
-      top.slice(0, 10).map((row) =>
+      top.map((row) =>
         h(
           'li',
           { class: cls(row.you && 'you') },
@@ -586,24 +722,175 @@ function leaderboard() {
   );
 }
 
-// ---- lobby
+// ---- profile: this browser's player, their numbers, and every game they have finished
 
-function topbar() {
-  const v = state.view;
-  const isHost = v.hostId === v.you;
+function profileScreen() {
+  const profile = state.profile;
+  const stats = profile?.stats ?? { games: 0, wins: 0, losses: 0, rated: 0 };
+  const me = profile?.me;
+  const stat = (label, value, note) => h('div', { class: 'stat' }, h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-label' }, label), note ? h('span', { class: 'muted small' }, note) : null);
+  const when = (time) => new Date(time).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
   return h(
-    'header',
-    { class: 'topbar' },
-    h('span', { class: 'brand' }, 'Fish'),
-    h('button', { class: 'room-pill', title: 'Copy the invite link', onclick: copyLink }, 'Room ', h('strong', {}, v.code), h('span', { class: 'copy' }, 'Copy link')),
-    h('span', { class: 'spacer' }),
-    isHost && v.phase === 'playing'
-      ? h('button', { class: 'btn quiet', onclick: () => confirm('End this game for everyone and go back to the lobby?') && send({ t: 'toLobby' }) }, 'End game')
-      : null,
-    h('button', { class: 'btn quiet', onclick: leaveRoom }, 'Leave'),
-    themeButton(),
+    'div',
+    { class: 'page' },
+    topbar(),
+    h(
+      'main',
+      { class: 'profile' },
+      h('h1', {}, 'Your profile'),
+      h(
+        'form',
+        { class: 'panel name-form', onsubmit: saveName },
+        h(
+          'label',
+          { class: 'field' },
+          h('span', {}, 'Name'),
+          h('input', {
+            type: 'text',
+            maxlength: 20,
+            autocomplete: 'nickname',
+            value: state.nameDraft ?? state.name,
+            oninput: (e) => {
+              state.nameDraft = e.target.value;
+            },
+          }),
+        ),
+        h('button', { class: 'btn', type: 'submit' }, 'Save'),
+      ),
+      PLAYER
+        ? h('p', { class: 'muted small' }, 'Your games and rating are kept for this browser. Clearing its site data, or playing from another browser, starts a new record.')
+        : h('p', { class: 'muted small' }, 'This browser is blocking storage, so it can’t be recognised from one visit to the next and no record is kept.'),
+      profile
+        ? h(
+            'section',
+            { class: 'stats', 'aria-label': 'Statistics' },
+            stat('Rating', me?.rating ?? '–', me?.rank ? `rank ${me.rank}` : 'no rated games yet'),
+            stat('Games', stats.games, `${stats.rated} rated`),
+            stat('Won', stats.wins),
+            stat('Lost', stats.losses),
+            stat('Win rate', stats.games ? `${Math.round((100 * stats.wins) / stats.games)}%` : '–'),
+          )
+        : h('p', { class: 'muted' }, 'Loading your record…'),
+      profile
+        ? h(
+            'section',
+            { class: 'panel history' },
+            h('h2', {}, 'Games'),
+            profile.games.length === 0
+              ? h('p', { class: 'muted' }, 'You haven’t finished a game yet. Every game you play to the end will be listed here.')
+              : h(
+                  'div',
+                  { class: 'table-scroll' },
+                  h(
+                    'table',
+                    { class: 'games' },
+                    h('thead', {}, h('tr', {}, ['Played', 'Result', 'Score', 'With', 'Against', 'Deck', 'Rating'].map((label) => h('th', { scope: 'col' }, label)))),
+                    h(
+                      'tbody',
+                      {},
+                      profile.games.map((game) =>
+                        h(
+                          'tr',
+                          {},
+                          h('td', { class: 'muted' }, when(game.endedAt)),
+                          h('td', {}, h('span', { class: `result-word ${game.won ? 'won' : 'lost'}` }, game.won ? 'Won' : 'Lost')),
+                          h('td', {}, `${game.score[0]}–${game.score[1]}`),
+                          h('td', {}, game.mates.join(', ') || '–'),
+                          h('td', {}, game.foes.join(', ')),
+                          h('td', {}, deckName(game.deck)),
+                          h(
+                            'td',
+                            {},
+                            game.rated && game.delta != null
+                              ? [h('span', { class: cls('delta', game.delta > 0 ? 'up' : 'down') }, game.delta > 0 ? `+${game.delta}` : `−${-game.delta}`), ' ', h('span', { class: 'muted' }, game.after)]
+                              : h('span', { class: 'muted' }, 'practice'),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+          )
+        : null,
+    ),
   );
 }
+
+// ---- help: the rules, for when someone wants them
+
+function helpScreen() {
+  const section = (title, ...body) => h('section', {}, h('h2', {}, title), body);
+  const p = (...text) => h('p', {}, text);
+  const b = (text) => h('strong', {}, text);
+  return h(
+    'div',
+    { class: 'page' },
+    topbar(),
+    h(
+      'main',
+      { class: 'help' },
+      h('h1', {}, 'How to play Fish'),
+      p('Fish, also called Literature, is a card game for two teams of two, three or four. The whole game is working out who holds which cards. The team that collects more sets wins.'),
+      section(
+        'Sets',
+        p('The deck is split into nine ', b('sets'), '. Each suit gives two: its ', b('low'), ' cards and its ', b('high'), ' cards. The four 8s and the jokers make the ninth.'),
+        h(
+          'ul',
+          {},
+          h('li', {}, b('Sets of six'), ' (54 cards): low is 2–7, high is 9–A, and the 8s go with two jokers.'),
+          h('li', {}, b('Sets of eight'), ' (72 cards): every suit also has a 0, 1, 11 and 12, so low is 0–7 and high is 9–A. The 8s go with four jokers, one in each suit.'),
+        ),
+        p('Spades are black, hearts red, diamonds blue and clubs green. In your hand, each set is laid out in full: the cards you hold are solid, and the ones you are missing are faint outlines.'),
+      ),
+      section(
+        'Your turn: ask for a card',
+        p('On your turn, ask ', b('one opponent'), ' for ', b('one exact card'), '. Two conditions: you must already hold a card from the same set, and you can’t ask for a card you hold yourself.'),
+        p('If they have it, they hand it over and you go again. If they don’t, the turn passes to them. Everyone sees every question and its answer, so each one tells the whole table something.'),
+        p('To ask, tap a faint card in your hand, pick the opponent, and press Ask.'),
+      ),
+      section(
+        'Declaring a set',
+        p('When you think your team holds a whole set between you, ', b('declare'), ' it: say which teammate holds each of its cards.'),
+        h(
+          'ul',
+          {},
+          h('li', {}, 'Every card right: your team wins the set.'),
+          h('li', {}, 'Any card wrong, including one an opponent turns out to hold: the other team wins it.'),
+        ),
+        p('Either way the set leaves the game and the cards are shown. Teammates may not tell each other what they hold, so declaring is done from what you have seen asked and answered.'),
+      ),
+      section(
+        'Running out of cards',
+        p('A player with no cards can’t be asked. If the turn falls to them it passes to the next teammate who has cards. When one whole team is out of cards, the other team has to declare everything that is left.'),
+        p('The game ends when all nine sets are won. Nine is odd, so there is always a winner.'),
+      ),
+      section(
+        'House rules',
+        p('The host chooses these before the game starts.'),
+        h(
+          'ul',
+          {},
+          h('li', {}, b('Deck'), ': sets of six or sets of eight, as above.'),
+          h('li', {}, b('Declaring'), ': only on your own turn, or at any time by anyone.'),
+          h('li', {}, b('Bot moves'), ': one at a time, with a bot waiting until a player presses Next (or Space); or automatically after a short pause.'),
+          h('li', {}, b('Question history'), ': a full log everyone can scroll back through, or only the last question, as at a real table.'),
+        ),
+      ),
+      section(
+        'Games, bots and seats',
+        p('A public game is listed in the lobby for anyone to join. A private game is reached only by its link or four-letter code. Teams need the same number of players, and bots can fill empty seats.'),
+        p('If you lose your connection or close the tab, your seat is kept: opening the game again from the same browser puts you back in it. If someone has gone for good, the host can let a bot play their cards, or a spectator can take the seat over.'),
+      ),
+      section(
+        'Ratings',
+        p('Everyone has an Elo rating that starts at 1000. A game is ', b('rated'), ' when each team has at least one human player and nobody is sitting in two seats; anything else is a practice game.'),
+        p('A team is rated as the average of its players, with bots counted as 1000. Winners take points from losers: 16 between evenly matched teams, more for beating a stronger team, fewer for beating a weaker one. Your profile lists every game you have finished.'),
+      ),
+    ),
+  );
+}
+
+// ---- setting up a game: teams, house rules, and the invitation
 
 function memberTags(m, { host = true } = {}) {
   const v = state.view;
@@ -616,7 +903,7 @@ function memberTags(m, { host = true } = {}) {
   ];
 }
 
-function lobbyScreen() {
+function setupScreen() {
   const v = state.view;
   const isHost = v.hostId === v.you;
   const me = v.members.find((m) => m.id === v.you);
@@ -699,12 +986,18 @@ function lobbyScreen() {
     topbar(),
     h(
       'main',
-      { class: 'lobby' },
+      { class: 'setup' },
       h(
         'section',
         { class: 'invite' },
         h('h1', {}, 'Waiting for players'),
-        h('p', { class: 'muted' }, 'Send friends this link, or tell them the code ', h('strong', { class: 'code' }, v.code), '.'),
+        h(
+          'p',
+          { class: 'muted' },
+          v.public ? 'This game is listed in the lobby. You can also send friends this link, or tell them the code ' : 'This is a private game: only people with this link, or the code ',
+          h('strong', { class: 'code' }, v.code),
+          v.public ? '.' : ', can join.',
+        ),
         h(
           'div',
           { class: 'invite-row' },
@@ -732,7 +1025,6 @@ function lobbyScreen() {
         problem ? h('p', { class: 'muted small start-note' }, problem) : null,
         h('p', { class: 'muted small start-note' }, ratedNote(v.unrated)),
       ),
-      rules(),
     ),
   );
 }
@@ -1250,6 +1542,10 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) =>
   applyTheme(event.matches ? 'dark' : 'light');
   render();
 });
+// "3 minutes ago" in the lobby's list should keep up with the clock.
+setInterval(() => {
+  if (!state.view && state.page === 'lobby') render();
+}, 30_000);
 applyTheme(currentTheme());
 render();
 connect();

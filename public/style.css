@@ -40,6 +40,9 @@
   --face-C: #177f3d;
   --ghost-line: #c2beb3; /* outline of a card you don't hold */
   --back: #3b4252; /* the back of a card */
+  /* Each player's name has its own hue; the theme sets how dark or light it is. */
+  --name-s: 62%;
+  --name-l: 36%;
 
   --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
   --radius: 16px;
@@ -76,6 +79,8 @@
   --card-shadow: 0 1px 0 rgb(0 0 0 / 0.5), 0 6px 14px rgb(0 0 0 / 0.35);
   --ghost-line: #474c55;
   --back: #4b5364;
+  --name-s: 72%;
+  --name-l: 73%;
 }
 
 *,
@@ -531,61 +536,7 @@ input[type='text']::placeholder {
   height: 0.82em;
 }
 
-/* ---- home ---- */
-
-.home {
-  position: relative;
-  max-width: 440px;
-  margin: 0 auto;
-  padding: clamp(24px, 7vh, 64px) 16px 48px;
-}
-
-.corner {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-}
-
-.fan {
-  display: flex;
-  justify-content: center;
-  height: 104px;
-  padding-top: 8px;
-}
-
-/* Each card pivots about a point well below it, which spreads them into an arc. */
-.fan-slot {
-  margin-inline: -12px;
-  transform: rotate(calc((var(--i) - 2.5) * 7deg));
-  transform-origin: 50% 240%;
-}
-
-.fan .card {
-  width: 50px;
-}
-
-.logo {
-  font-size: clamp(3.2rem, 14vw, 4.4rem);
-  letter-spacing: -0.02em;
-  line-height: 1;
-  text-align: center;
-}
-
-.tagline {
-  max-width: 34ch;
-  margin: 12px auto 26px;
-  color: var(--muted);
-  text-align: center;
-  text-wrap: balance;
-}
-
-.home .panel h2 {
-  font-size: 1.3rem;
-}
-
-.home form .btn.big {
-  width: 100%;
-}
+/* ---- small form pieces ---- */
 
 .field {
   display: grid;
@@ -596,22 +547,6 @@ input[type='text']::placeholder {
   color: var(--muted);
   font-size: 0.85rem;
   font-weight: 600;
-}
-
-.divider {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.divider::before,
-.divider::after {
-  flex: 1;
-  height: 1px;
-  background: var(--line);
-  content: '';
 }
 
 .join-row {
@@ -629,6 +564,324 @@ input[type='text']::placeholder {
 
 .code-input::placeholder {
   font-weight: 400;
+  letter-spacing: 0.05em;
+  text-transform: none;
+}
+
+.name {
+  color: hsl(var(--hue) var(--name-s) var(--name-l));
+  font-weight: 650;
+  text-decoration: none;
+}
+
+a.name:hover {
+  text-decoration: underline;
+}
+
+.notice {
+  padding: 64px 16px;
+  text-align: center;
+}
+
+/* ---- lobby: chat on the left, the games in the middle, starting one on the right ---- */
+
+.lobby {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 16px 12px 8px;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 340px;
+  padding: 14px;
+}
+
+.chat h2 {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 1.15rem;
+  text-align: center;
+}
+
+.chat-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  margin: 0;
+  padding: 0 2px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  list-style: none;
+}
+
+.lobby-tabs {
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+}
+
+.lobby-tab {
+  padding: 11px 8px;
+  border: 0;
+  border-bottom: 2px solid var(--line);
+  background: none;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.lobby-tab:hover {
+  color: var(--text);
+}
+
+.lobby-tab[aria-selected='true'] {
+  border-bottom-color: var(--text);
+  color: var(--text);
+}
+
+.tab-count {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--hover);
+  font-size: 0.75rem;
+}
+
+.lobby-table {
+  max-height: 68vh;
+  padding: 0;
+  overflow: auto;
+  border-top: 0;
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+.empty-note,
+.lobby-table .board {
+  padding: 18px 16px;
+}
+
+/* A list of games: in the lobby, and on the profile page. */
+.games {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.games th {
+  position: sticky;
+  top: 0;
+  padding: 11px 16px;
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--line);
+  font-size: 0.9rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.games td {
+  padding: 11px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.games tbody tr:first-child td {
+  border-top: 0;
+}
+
+.lobby-table .games tbody tr {
+  cursor: pointer;
+}
+
+.lobby-table .games tbody tr:hover {
+  background: var(--raised);
+}
+
+.games .tag {
+  margin-left: 8px;
+}
+
+/* Whether a game can still be joined: a dot and a word. */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.status::before {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  content: '';
+}
+
+.status.waiting::before {
+  background: var(--good);
+}
+
+.status.playing::before {
+  background: var(--A-fill);
+}
+
+.lobby-side {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.lobby-stats {
+  margin-top: 6px;
+  color: var(--muted);
+  line-height: 1.9;
+}
+
+.lobby-stats strong {
+  color: var(--text);
+}
+
+.footer {
+  padding: 18px 16px 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.footer a,
+.help a {
+  color: var(--text);
+  text-underline-offset: 3px;
+}
+
+/* ---- help ---- */
+
+.help {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 28px 16px 56px;
+  line-height: 1.6;
+}
+
+.help h1,
+.profile h1 {
+  margin-bottom: 12px;
+  font-size: 2.1rem;
+}
+
+.help h2 {
+  margin: 30px 0 8px;
+  font-size: 1.35rem;
+}
+
+.help p {
+  margin-bottom: 10px;
+}
+
+.help ul {
+  margin: 0 0 10px;
+  padding-left: 1.3em;
+}
+
+.help li {
+  margin: 5px 0;
+}
+
+/* ---- profile ---- */
+
+.profile {
+  display: grid;
+  gap: 14px;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 28px 16px 56px;
+}
+
+.profile h1 {
+  margin-bottom: 0;
+}
+
+.name-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  max-width: 460px;
+}
+
+.name-form .field {
+  flex: 1;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.stat {
+  display: grid;
+  gap: 2px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.stat-value {
+  font-family: var(--serif);
+  font-size: 2rem;
+  font-variant-numeric: lining-nums tabular-nums;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.stat-label {
+  font-weight: 650;
+}
+
+.history {
+  padding: 0;
+  overflow: hidden;
+}
+
+.history h2 {
+  padding: 14px 16px 6px;
+  font-size: 1.3rem;
+}
+
+.history > p {
+  padding: 4px 16px 18px;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.history .games td {
+  white-space: nowrap;
+}
+
+.result-word {
+  font-weight: 700;
+}
+
+.result-word.won,
+.delta.up {
+  color: var(--good);
+}
+
+.result-word.lost,
+.delta.down {
+  color: var(--bad);
+}
+
+.delta {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
 /* ---- leaderboard ---- */
@@ -636,7 +889,6 @@ input[type='text']::placeholder {
 .board {
   display: grid;
   gap: 10px;
-  margin-top: 16px;
 }
 
 .board-list {
@@ -690,31 +942,6 @@ input[type='text']::placeholder {
   text-align: right;
 }
 
-.rules {
-  margin-top: 22px;
-  color: var(--muted);
-  font-size: 0.92rem;
-}
-
-.rules summary {
-  color: var(--text);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.rules ul {
-  margin: 10px 0 0;
-  padding-left: 1.2em;
-}
-
-.rules li {
-  margin: 7px 0;
-}
-
-.rules strong {
-  color: var(--text);
-}
-
 /* ---- top bar ---- */
 
 .topbar {
@@ -728,10 +955,34 @@ input[type='text']::placeholder {
 
 .brand {
   margin-right: 2px;
+  color: inherit;
   font-family: var(--serif);
   font-size: 1.35rem;
   font-weight: 700;
   line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.me {
+  max-width: 14ch;
+  overflow: hidden;
+  padding: 6px 10px;
+  border-radius: 9px;
+  color: var(--text);
+  font-weight: 650;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.me:hover {
+  background: var(--hover);
+}
+
+a.icon-btn {
+  font-weight: 700;
+  text-decoration: none;
 }
 
 .room-pill {
@@ -767,9 +1018,9 @@ input[type='text']::placeholder {
   flex: 1;
 }
 
-/* ---- lobby ---- */
+/* ---- setting up a game ---- */
 
-.lobby {
+.setup {
   display: grid;
   gap: 18px;
   max-width: 860px;
@@ -1624,6 +1875,47 @@ input[type='text']::placeholder {
 @media (max-width: 480px) {
   .room-pill .copy {
     display: none;
+  }
+
+  /* Phones are short of room in the bar during a game: the profile link can wait. */
+  .topbar.in-room .me {
+    display: none;
+  }
+
+  /* ...and in the list of games, the two least urgent columns. */
+  .lobby-table .games th:nth-child(3),
+  .lobby-table .games td:nth-child(3),
+  .lobby-table .games th:nth-child(5),
+  .lobby-table .games td:nth-child(5) {
+    display: none;
+  }
+}
+
+/* Narrow screens stack the lobby: starting a game first, then the games, then the chat. */
+@media (max-width: 999px) {
+  .lobby-side {
+    order: -1;
+  }
+
+  .chat {
+    order: 1;
+  }
+}
+
+@media (min-width: 1000px) {
+  .lobby {
+    grid-template-columns: 300px minmax(0, 1fr) 280px;
+    align-items: start;
+    gap: 20px;
+    padding-top: 28px;
+  }
+
+  .chat {
+    height: min(72vh, 680px);
+  }
+
+  .lobby-side {
+    padding-top: 48px; /* level with the table, below the tabs */
   }
 }
 

@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { History } from './history.js';
 import { Ratings } from './ratings.js';
 import { Rooms } from './rooms.js';
 
@@ -34,10 +35,10 @@ async function serveStatic(req, res) {
   }
   if (pathname === '/healthz') return send(200, 'ok');
 
-  // "/" and "/ABCD" (a room link) both load the app.
+  // The lobby, the help and profile pages, and "/ABCD" (a room link) all load the app.
   let base = PUBLIC;
   let relative = pathname;
-  if (pathname === '/' || /^\/[A-Za-z]{4}$/.test(pathname)) relative = '/index.html';
+  if (['/', '/help', '/profile'].includes(pathname) || /^\/[BCDFGHJKLMNPQRSTVWXZ]{4}$/i.test(pathname)) relative = '/index.html';
   else if (pathname.startsWith('/shared/')) [base, relative] = [SHARED, pathname.slice('/shared'.length)];
   const file = path.join(base, relative);
   if (!file.startsWith(base + path.sep)) return send(404, 'Not found');
@@ -50,12 +51,17 @@ async function serveStatic(req, res) {
 
 /**
  * @param {object} options  Options for Rooms, plus:
- *   `ratingsFile`: where Elo ratings are saved. Without it they last only as long as the process.
+ *   `dataDir`: a folder for what should outlive a restart: Elo ratings (ratings.json)
+ *     and the record of finished games (games.jsonl). Without it they last only as long as the process.
  *   `messagesPer10s`: how many messages one connection may send in ten seconds.
  *     Stepping through bot moves takes one per move, so it has to leave room for quick clicking.
  */
-export function createApp({ ratingsFile = null, messagesPer10s = 200, ...options } = {}) {
-  const rooms = new Rooms({ ratings: new Ratings({ file: ratingsFile }), ...options });
+export function createApp({ dataDir = null, messagesPer10s = 200, ...options } = {}) {
+  const rooms = new Rooms({
+    ratings: new Ratings({ file: dataDir && path.join(dataDir, 'ratings.json') }),
+    history: new History({ file: dataDir && path.join(dataDir, 'games.jsonl') }),
+    ...options,
+  });
   const server = http.createServer(serveStatic);
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 8 * 1024 });
 
