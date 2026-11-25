@@ -15,7 +15,7 @@ export function shuffle(items, rng = Math.random) {
 }
 
 /**
- * @param {{ seats: { id: string, team: 'A' | 'B' }[], deck?: 48 | 54, declareAnytime?: boolean, rng?: () => number }} options
+ * @param {{ seats: { id: string, team: 'A' | 'B' }[], deck?: 54 | 72, declareAnytime?: boolean, rng?: () => number }} options
  *   `seats` is the order around the table and must alternate teams, so that an
  *   uneven deal (54 cards between 4 or 8 players) gives both teams the same total.
  */

@@ -6,14 +6,15 @@ import { buildSets, cardInfo, setIdOf } from '/shared/cards.js';
 
 const TEAM_NAMES = { A: 'Orange', B: 'Blue' };
 const other = (team) => (team === 'A' ? 'B' : 'A');
+const cls = (...names) => names.filter(Boolean).join(' ');
 
 const SETTINGS = [
   {
     key: 'deck',
     label: 'Deck',
     options: [
-      [54, '54 cards', 'Nine sets: the 8s and two jokers make the ninth, so no ties.'],
-      [48, '48 cards', 'Eight sets: the 8s are left out.'],
+      [54, 'Nine sets of six', '54 cards. Each suit splits into low (2–7) and high (9–A); the 8s and two jokers make the ninth set.'],
+      [72, 'Nine sets of eight', '72 cards. Every suit gains a 0, 1, 11 and 12, and there are four jokers. Gives 8 players nine cards each.'],
     ],
   },
   {
@@ -81,6 +82,7 @@ const state = {
   declOpen: false,
   declSet: null,
   declAssign: {},
+  fresh: new Set(), // cards that arrived in the latest update, so they can be animated in
   toast: null,
   flashed: 0,
 };
@@ -100,9 +102,7 @@ function connect() {
     state.status = 'open';
     const session = state.code && loadSession(state.code);
     state.joining = Boolean(session) && !state.view;
-    if (session) {
-      send({ t: 'join', code: state.code, name: session.name, token: session.token });
-    }
+    if (session) send({ t: 'join', code: state.code, name: session.name, token: session.token });
     render();
   };
   ws.onmessage = (event) => receive(JSON.parse(event.data));
@@ -131,12 +131,16 @@ function receive(msg) {
       save(sessionStorage, sessionKey(msg.code), JSON.stringify({ token: msg.token, name: state.nameDraft }));
       if (location.pathname !== `/${msg.code}`) history.replaceState(null, '', `/${msg.code}`);
       break;
-    case 'state':
+    case 'state': {
+      // Anything in the new hand that wasn't in the old one was just dealt or won.
+      const before = state.view ? (state.view.game?.hand ?? []) : null;
+      state.fresh = new Set(before && msg.game ? msg.game.hand.filter((card) => !before.includes(card)) : []);
       state.view = msg;
       state.busy = false;
       state.joining = false;
       reconcile();
       break;
+    }
     case 'error':
       state.busy = false;
       state.joining = false;
@@ -256,7 +260,13 @@ function reconcile() {
 
   if (state.askCard && (hand.has(state.askCard) || !heldSets.has(setIdOf(state.askCard)))) state.askCard = null;
   if (state.askTarget && !cardsOf.get(state.askTarget)) state.askTarget = null;
-  if (game.turn !== you) state.tab = 'ask';
+  if (game.turn !== you) {
+    state.tab = 'ask';
+  } else if (state.declOpen) {
+    // The turn arrived while they were filling in a declaration: keep them on it.
+    state.tab = 'declare';
+    state.declOpen = false;
+  }
 
   const set = buildSets(game.deck).find((s) => s.id === state.declSet);
   if (!set || game.sets.find((s) => s.id === set.id).claimedBy) {
@@ -322,14 +332,14 @@ function render() {
   morph(root, h('div', { id: 'app' }, screen(), statusBar(), toastEl()));
 
   const game = state.view?.game;
-  document.title = game?.turn && game.turn === state.view.you ? '● Your turn · Fish' : 'Fish with Friends';
+  document.title = game?.turn && game.turn === state.view.you ? 'Your turn · Fish' : 'Fish with Friends';
 
   // Draw the eye to the announcement whenever something new has happened.
   const seq = game?.log.at(-1)?.seq ?? 0;
   if (seq !== state.flashed) {
     state.flashed = seq;
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (seq && !reduced) root.querySelector('.banner')?.animate([{ transform: 'scale(1.02)', filter: 'brightness(1.35)' }, {}], 450);
+    if (seq && !reduced) root.querySelector('.banner')?.animate([{ transform: 'scale(1.015)', filter: 'brightness(1.4)' }, {}], 450);
   }
 }
 
@@ -350,16 +360,37 @@ function toastEl() {
 
 // ---- small pieces used everywhere
 
-function cardEl(card, { small = false } = {}) {
+/** A suit mark, drawn in CSS so it looks the same on every device. No suit means a joker's star. */
+function pip(suit) {
+  return h('span', { class: `pip pip-${suit ?? 'star'}`, 'aria-hidden': 'true' });
+}
+
+function icon(name) {
+  return h('span', { class: `icon icon-${name}`, 'aria-hidden': 'true' });
+}
+
+function cardFace(info) {
+  return [h('span', { class: 'rank' }, info.rank), pip(info.suit)];
+}
+
+function cardEl(card, { small = false, fresh = false } = {}) {
   const info = cardInfo(card);
-  const cls = ['card', info.red && 'red', info.joker && 'joker', small && 'small'].filter(Boolean).join(' ');
-  return h('span', { class: cls, title: info.name }, h('span', { class: 'rank' }, info.rank), h('span', { class: 'suit' }, info.symbol));
+  return h(
+    'span',
+    { class: cls('card', info.red && 'red', info.joker && 'joker', small && 'small', fresh && 'fresh'), role: 'img', 'aria-label': info.name, title: info.name },
+    cardFace(info),
+  );
 }
 
 /** A card mentioned in running text. */
 function cardChip(card) {
   const info = cardInfo(card);
-  return h('span', { class: `chip${info.red ? ' red' : ''}`, title: info.name }, info.label);
+  return h('span', { class: cls('chip', info.red && 'red'), role: 'img', 'aria-label': info.name, title: info.name }, info.rank, pip(info.suit));
+}
+
+/** Short name for a set: its suit mark and "low" or "high". */
+function setLabel(set) {
+  return set.suit ? [pip(set.suit), set.kind] : '8s & jokers';
 }
 
 function tag(text, kind = '') {
@@ -374,10 +405,10 @@ function rules() {
     h(
       'ul',
       {},
-      h('li', {}, 'Two teams. The deck is split into ', h('strong', {}, 'sets'), ' of six cards: the low cards (2–7) and the high cards (9–A) of each suit. With the 54-card deck, the four 8s and two jokers make a ninth set.'),
+      h('li', {}, 'Two teams. The deck is split into nine ', h('strong', {}, 'sets'), ': the low cards and the high cards of each suit, plus the four 8s with the jokers.'),
       h('li', {}, 'On your turn, ', h('strong', {}, 'ask'), ' one opponent for one exact card. You must already hold a card from the same set, and you can’t ask for a card you have.'),
       h('li', {}, 'If they have it, they hand it over and you go again. If not, the turn passes to them.'),
-      h('li', {}, 'When you think your team holds a whole set, ', h('strong', {}, 'declare'), ' it by saying which teammate has each card. All six right and your team wins the set; any mistake and the other team gets it.'),
+      h('li', {}, 'When you think your team holds a whole set, ', h('strong', {}, 'declare'), ' it by saying which teammate has each card. All right and your team wins the set; any mistake and the other team gets it.'),
       h('li', {}, 'No table talk about cards. The team with the most sets wins.'),
     ),
   );
@@ -443,7 +474,9 @@ function homeScreen() {
   return h(
     'main',
     { class: 'home' },
-    h('h1', { class: 'logo' }, h('span', { class: 'logo-fish' }, '🐟'), 'Fish'),
+    // A fanned set of cards: the thing you are trying to collect.
+    h('div', { class: 'fan', 'aria-hidden': 'true' }, ['2H', '3H', '4H', '5H', '6H', '7H'].map((card, i) => h('span', { class: 'fan-slot', style: `--i: ${i}` }, cardEl(card)))),
+    h('h1', { class: 'logo' }, 'Fish'),
     h('p', { class: 'tagline' }, 'The team card game of asking, remembering and declaring, also known as Literature. For 4, 6 or 8 players.'),
     body,
     rules(),
@@ -458,7 +491,7 @@ function topbar() {
   return h(
     'header',
     { class: 'topbar' },
-    h('span', { class: 'brand' }, '🐟 Fish'),
+    h('span', { class: 'brand' }, 'Fish'),
     h('button', { class: 'room-pill', title: 'Copy the invite link', onclick: copyLink }, 'Room ', h('strong', {}, v.code), h('span', { class: 'copy' }, 'Copy link')),
     h('span', { class: 'spacer' }),
     isHost && v.phase === 'playing'
@@ -468,11 +501,11 @@ function topbar() {
   );
 }
 
-function memberTags(m) {
+function memberTags(m, { host = true } = {}) {
   const v = state.view;
   return [
     m.id === v.you && tag('you'),
-    m.id === v.hostId && tag('host'),
+    host && m.id === v.hostId && tag('host'),
     m.bot && tag('bot'),
     !m.bot && !m.online && tag('offline', 'warn'),
     m.auto && tag('bot playing'),
@@ -510,7 +543,7 @@ function lobbyScreen() {
             h('span', { class: 'nm' }, m.name),
             memberTags(m),
             isHost && m.id !== v.you
-              ? h('button', { class: 'icon-btn', title: `Remove ${m.name}`, 'aria-label': `Remove ${m.name}`, onclick: () => send({ t: 'kick', id: m.id }) }, '×')
+              ? h('button', { class: 'icon-btn', title: `Remove ${m.name}`, 'aria-label': `Remove ${m.name}`, onclick: () => send({ t: 'kick', id: m.id }) }, icon('cross'))
               : null,
           ),
         ),
@@ -534,20 +567,23 @@ function lobbyScreen() {
         'fieldset',
         {},
         h('legend', {}, label),
-        options.filter(([value]) => isHost || v.settings[key] === value).map(([value, title, detail]) =>
-          h(
-            'label',
-            { class: `option${v.settings[key] === value ? ' on' : ''}${isHost ? '' : ' locked'}` },
-            h('input', {
-              type: 'radio',
-              name: key,
-              checked: v.settings[key] === value,
-              disabled: !isHost,
-              onchange: () => send({ t: 'settings', settings: { [key]: value } }),
-            }),
-            h('span', {}, h('strong', {}, title), h('span', { class: 'muted small' }, detail)),
+        // Guests see just the rule in force, not every option greyed out.
+        options
+          .filter(([value]) => isHost || v.settings[key] === value)
+          .map(([value, title, detail]) =>
+            h(
+              'label',
+              { class: cls('option', v.settings[key] === value && 'on', !isHost && 'locked') },
+              h('input', {
+                type: 'radio',
+                name: key,
+                checked: v.settings[key] === value,
+                disabled: !isHost,
+                onchange: () => send({ t: 'settings', settings: { [key]: value } }),
+              }),
+              h('span', {}, h('strong', {}, title), h('span', { class: 'muted small' }, detail)),
+            ),
           ),
-        ),
       ),
     ),
   );
@@ -612,7 +648,7 @@ function gameContext() {
   const myTurn = seated && g.turn === v.you;
   const foes = seats.filter((m) => m.team !== myTeam);
   const canAsk = myTurn && foes.some((m) => m.cards > 0) && sets.some((s) => !s.claimedBy && s.held > 0 && s.held < s.cards.length);
-  return { v, g, byId, me, seated, myTeam, hand, sets, seats, myTurn, foes, canAsk, isHost: v.hostId === v.you };
+  return { v, g, byId, me, seated, myTeam, hand, sets, setSize: sets[0].cards.length, seats, myTurn, foes, canAsk, isHost: v.hostId === v.you };
 }
 
 /** A player's name in their team colour; "you" for the viewer. */
@@ -654,6 +690,18 @@ function scoreboard(c) {
       h('span', { class: 'score-name' }, TEAM_NAMES[team], c.myTeam === team ? tag('your team') : null),
       h('span', { class: 'score-num' }, c.g.score[team]),
     );
+  // One marker per suit with a low half and a high half, then the eights.
+  const segment = (set, label) =>
+    h(
+      'span',
+      { class: cls('seg', set.claimedBy && `claimed team-${set.claimedBy}`), title: `${set.name}: ${set.claimedBy ? `won by ${TEAM_NAMES[set.claimedBy]}` : 'still in play'}` },
+      label,
+    );
+  const bySuit = [];
+  for (const set of c.sets) {
+    if (set.suit && bySuit.at(-1)?.[0].suit === set.suit) bySuit.at(-1).push(set);
+    else bySuit.push([set]);
+  }
   return h(
     'section',
     { class: 'scoreboard panel', 'aria-label': 'Score' },
@@ -661,16 +709,7 @@ function scoreboard(c) {
     h(
       'div',
       { class: 'set-strip' },
-      c.sets.map((s) =>
-        h(
-          'span',
-          {
-            class: `set-chip ${s.claimedBy ? `team-${s.claimedBy} claimed` : 'open'}`,
-            title: `${s.name}: ${s.claimedBy ? `won by ${TEAM_NAMES[s.claimedBy]}` : 'still in play'}`,
-          },
-          s.short,
-        ),
-      ),
+      bySuit.map((group) => h('span', { class: 'set-group' }, group[0].suit ? pip(group[0].suit) : null, group.map((s) => segment(s, s.suit ? s.kind : '8s & jokers')))),
     ),
     side('B'),
   );
@@ -688,33 +727,31 @@ function playersPanel(c) {
         'div',
         { class: `player-group team-${team}` },
         h('h2', {}, h('span', { class: 'team-dot' }), title),
-        h('div', { class: 'player-row' }, c.seats.filter((m) => m.team === team).map((m) => playerTile(c, m))),
+        h('div', { class: 'seat-row' }, c.seats.filter((m) => m.team === team).map((m) => seat(c, m))),
       ),
     ),
   );
 }
 
-function playerTile(c, m) {
+function seat(c, m) {
   const turn = c.g.turn === m.id;
   const away = !m.bot && !m.online;
-  const cls = ['player', `team-${m.team}`, turn && 'turn', m.cards === 0 && 'out', away && 'away'].filter(Boolean).join(' ');
   const playing = c.v.phase === 'playing';
   return h(
     'div',
-    { class: cls },
-    h('div', { class: 'player-name' }, h('span', { class: 'nm' }, m.name), memberTags(m).filter((t) => t && t.textContent !== 'host')),
+    { class: cls('seat', `team-${m.team}`, turn && 'turn', m.cards === 0 && 'out', away && 'away') },
     h(
       'div',
-      { class: 'player-meta' },
-      h('span', { class: 'mini-card' }),
-      h('strong', {}, m.cards),
-      m.cards === 1 ? ' card' : ' cards',
+      { class: 'seat-main' },
+      h('div', { class: 'seat-name' }, h('span', { class: 'nm' }, m.name), memberTags(m, { host: false })),
       turn ? h('span', { class: 'turn-pill' }, 'to play') : null,
+      playing && away && c.isHost
+        ? h('button', { class: 'btn tiny', onclick: () => send({ t: 'botControl', id: m.id, on: !m.auto }) }, m.auto ? 'Stop the bot' : 'Let a bot play')
+        : null,
+      playing && away && !c.seated ? h('button', { class: 'btn tiny', onclick: () => send({ t: 'claimSeat', id: m.id }) }, 'Take this seat') : null,
     ),
-    playing && away && c.isHost
-      ? h('button', { class: 'btn tiny', onclick: () => send({ t: 'botControl', id: m.id, on: !m.auto }) }, m.auto ? 'Stop the bot' : 'Let a bot play')
-      : null,
-    playing && away && !c.seated ? h('button', { class: 'btn tiny', onclick: () => send({ t: 'claimSeat', id: m.id }) }, 'Take this seat') : null,
+    // The number of cards held, shown on the back of a card.
+    h('span', { class: 'held', title: `${m.cards} ${m.cards === 1 ? 'card' : 'cards'}` }, m.cards, h('span', { class: 'sr-only' }, m.cards === 1 ? ' card' : ' cards')),
   );
 }
 
@@ -765,7 +802,7 @@ function banner(c) {
         const wrong = last.actual[card] !== last.assignment[card];
         return h(
           'span',
-          { class: `reveal-item${wrong ? ' wrong' : ''}` },
+          { class: cls('reveal-item', wrong && 'wrong') },
           cardChip(card),
           ' ',
           who(c, last.actual[card]),
@@ -782,7 +819,7 @@ function resultPanel(c) {
   const mine = !c.myTeam || winner === 'tie' ? null : winner === c.myTeam ? 'Your team won!' : 'Your team lost this one.';
   return h(
     'section',
-    { class: `panel result ${winner === 'tie' ? '' : `team-${winner}`}` },
+    { class: cls('panel result', winner !== 'tie' && `team-${winner}`) },
     h('h2', {}, line),
     mine ? h('p', {}, mine) : null,
     c.isHost
@@ -861,15 +898,17 @@ function actionPanel(c) {
 
 function askForm(c) {
   const target = c.byId.get(state.askTarget);
+  const info = state.askCard && cardInfo(state.askCard);
+  const ready = info && target;
   return h(
     'div',
     { class: 'ask' },
-    state.askCard ? null : h('p', { class: 'hint' }, 'Tap a faded card in your hand to choose what to ask for, then pick an opponent.'),
+    info ? null : h('p', { class: 'hint' }, 'Tap a faded card in your hand to choose what to ask for, then pick an opponent.'),
     h(
       'div',
       { class: 'ask-line' },
       h('span', { class: 'step-label' }, 'Ask for'),
-      state.askCard ? cardEl(state.askCard, { small: true }) : h('span', { class: 'card small ghost' }, '?'),
+      info ? cardEl(state.askCard, { small: true }) : h('span', { class: 'card small ghost' }, h('span', { class: 'rank' }, '?')),
       h('span', { class: 'step-label' }, 'from'),
       c.foes.map((m) =>
         h(
@@ -890,8 +929,8 @@ function askForm(c) {
     ),
     h(
       'button',
-      { class: 'btn primary big', disabled: !state.askCard || !target || state.busy, onclick: submitAsk },
-      state.askCard && target ? `Ask ${target.name} for the ${cardInfo(state.askCard).label}` : 'Ask',
+      { class: 'btn primary big', disabled: !ready || state.busy, 'aria-label': ready ? `Ask ${target.name} for the ${info.name}` : null, onclick: submitAsk },
+      ready ? ['Ask ', target.name, ' for the ', h('span', { class: 'inline-card' }, info.rank, pip(info.suit))] : 'Ask',
     ),
   );
 }
@@ -922,9 +961,9 @@ function declareForm(c) {
       open.map((s) =>
         h(
           'button',
-          { class: 'pill', 'aria-pressed': String(s.id === state.declSet), onclick: () => chooseDeclareSet(c, s) },
-          s.short,
-          s.held ? h('span', { class: 'pill-count' }, `${s.held}/6`) : null,
+          { class: 'pill', 'aria-pressed': String(s.id === state.declSet), 'aria-label': s.name, onclick: () => chooseDeclareSet(c, s) },
+          setLabel(s),
+          s.held ? h('span', { class: 'pill-count' }, `${s.held}/${s.cards.length}`) : null,
         ),
       ),
     ),
@@ -976,34 +1015,34 @@ function handPanel(c) {
     groups.length === 0 ? h('p', { class: 'muted' }, 'You’re out of cards. Your team can still win sets, so keep track of who has what.') : null,
     h(
       'div',
-      { class: 'hand-groups' },
+      { class: 'hand-groups', style: `--n: ${c.setSize}` },
       groups.map((set) =>
         h(
           'div',
           { class: 'hand-set' },
-          h('h3', {}, set.name),
+          h('h3', {}, set.suit ? pip(set.suit) : null, set.name, h('span', { class: 'count' }, `${set.held}/${set.cards.length}`)),
           h(
             'div',
             { class: 'hand-cards' },
             set.cards.map((card) => {
-              if (c.hand.has(card)) return cardEl(card);
+              if (c.hand.has(card)) return cardEl(card, { fresh: state.fresh.has(card) });
               // A card you are missing: on your turn, tapping it picks it as the card to ask for.
               const info = cardInfo(card);
               const selected = state.askCard === card;
               return h(
                 'button',
                 {
-                  class: ['card', 'ghost', info.red && 'red', info.joker && 'joker', picking && 'pickable', selected && 'selected'].filter(Boolean).join(' '),
+                  class: cls('card', 'ghost', info.red && 'red', info.joker && 'joker', picking && 'pickable', selected && 'selected'),
                   disabled: !picking,
                   'aria-pressed': String(selected),
                   'aria-label': `Ask for the ${info.name}`,
+                  title: info.name,
                   onclick: () => {
                     state.askCard = selected ? null : card;
                     render();
                   },
                 },
-                h('span', { class: 'rank' }, info.rank),
-                h('span', { class: 'suit' }, info.symbol),
+                cardFace(info),
               );
             }),
           ),
@@ -1021,7 +1060,7 @@ function logPanel(c) {
       return h(
         'li',
         { class: event.success ? 'good' : 'bad' },
-        h('span', { class: 'mark' }, event.success ? '✓' : '✗'),
+        icon(event.success ? 'check' : 'cross'),
         h('span', {}, who(c, event.asker, { capital: true }), ' asked ', who(c, event.target), ' for ', cardChip(event.card)),
       );
     }
@@ -1029,7 +1068,7 @@ function logPanel(c) {
     return h(
       'li',
       { class: `declared ${event.correct ? 'good' : 'bad'}` },
-      h('span', { class: 'mark' }, event.correct ? '★' : '✗'),
+      icon(event.correct ? 'star' : 'cross'),
       h(
         'span',
         {},

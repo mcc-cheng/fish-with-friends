@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import WebSocket from 'ws';
 import { createApp } from '../server/app.js';
+import { buildSets } from '../shared/cards.js';
 
 let app;
 let port;
@@ -115,7 +116,7 @@ test('lobby: joining, teams, bots, settings and host-only actions', async () => 
   // Guests can't use host controls.
   await guest.fails({ t: 'start' });
   await guest.fails({ t: 'addBot', team: 'A' });
-  await guest.fails({ t: 'settings', settings: { deck: 48 } });
+  await guest.fails({ t: 'settings', settings: { deck: 72 } });
   await guest.fails({ t: 'kick', id: state.you });
 
   // Uneven or too-small teams can't start.
@@ -123,10 +124,10 @@ test('lobby: joining, teams, bots, settings and host-only actions', async () => 
   await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 3);
   assert.match((await host.fails({ t: 'start' })).message, /same number/);
 
-  await host.fails({ t: 'settings', settings: { deck: 12 } });
+  await host.fails({ t: 'settings', settings: { deck: 48 } });
   await host.fails({ t: 'settings', settings: { constructor: 1 } });
-  state = await host.act({ t: 'settings', settings: { deck: 48, history: 'last' } }, (s) => s.settings.deck === 48);
-  assert.deepEqual(state.settings, { deck: 48, declare: 'turn', history: 'last' });
+  state = await host.act({ t: 'settings', settings: { deck: 72, history: 'last' } }, (s) => s.settings.deck === 72);
+  assert.deepEqual(state.settings, { deck: 72, declare: 'turn', history: 'last' });
 
   // Switching teams, and a full team refusing a fifth player.
   const teamA = (s) => s.members.filter((m) => m.team === 'A');
@@ -152,7 +153,7 @@ test('a game: private hands, asking, declaring, spectators', async () => {
   // Ada + bot against Grace + bot, with instant bots.
   await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 3);
   await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
-  await host.act({ t: 'settings', settings: { deck: 48 } }, (s) => s.settings.deck === 48);
+  await host.act({ t: 'settings', settings: { deck: 72 } }, (s) => s.settings.deck === 72);
 
   const guestStarted = guest.state((s) => s.phase === 'playing');
   host.send({ t: 'start' });
@@ -174,7 +175,7 @@ test('a game: private hands, asking, declaring, spectators', async () => {
   assert.equal(mine.game.hand.length, mine.members.find((m) => m.id === mine.you).cards);
   assert.equal(theirs.game.hand.length, theirs.members.find((m) => m.id === theirs.you).cards);
   assert.ok(!mine.game.hand.some((card) => theirs.game.hand.includes(card)));
-  assert.equal(mine.members.reduce((n, m) => n + m.cards, 0), 48 - 6 * mine.game.sets.filter((s) => s.claimedBy).length);
+  assert.equal(mine.members.reduce((n, m) => n + m.cards, 0), 72 - 8 * mine.game.sets.filter((s) => s.claimedBy).length);
   assert.ok(!JSON.stringify(mine).includes('token'));
 
   // Whoever isn't on turn is refused.
@@ -209,7 +210,7 @@ test('a game: private hands, asking, declaring, spectators', async () => {
     assert.equal(reply.t, 'state', reply.message);
   }
   const end = (await finished) ?? (await host.state((s) => s.phase === 'finished', { fresh: false }));
-  assert.equal(end.game.score.A + end.game.score.B, 8);
+  assert.equal(end.game.score.A + end.game.score.B, 9);
   assert.ok(['A', 'B', 'tie'].includes(end.game.winner));
   assert.equal(end.members.filter((m) => m.cards > 0).length, 0);
 
@@ -220,9 +221,8 @@ test('a game: private hands, asking, declaring, spectators', async () => {
 });
 
 function allToMe(setId, me) {
-  const suit = setId.at(-1);
-  const ranks = setId[0] === 'L' ? ['2', '3', '4', '5', '6', '7'] : ['9', '10', 'J', 'Q', 'K', 'A'];
-  return Object.fromEntries(ranks.map((rank) => [rank + suit, me]));
+  const set = buildSets(72).find((s) => s.id === setId);
+  return Object.fromEntries(set.cards.map((card) => [card, me]));
 }
 
 test('reconnecting with a token restores the seat; a stranger can take over an abandoned one', async () => {

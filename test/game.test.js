@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildSets, setIdOf, sortCards } from '../shared/cards.js';
+import { buildSets, cardInfo, setIdOf, sortCards } from '../shared/cards.js';
 import { chooseMove } from '../server/bot.js';
 import { ask, askableCards, createGame, declare } from '../server/game.js';
 
@@ -19,7 +19,7 @@ function seeded(seed) {
 const seats = (n) => Array.from({ length: n }, (_, i) => ({ id: `p${i}`, team: i % 2 === 0 ? 'A' : 'B' }));
 
 /** A game with hands chosen by the test: `hands` maps player id -> card ids. */
-function rigged(hands, { deck = 48, turn = 'p0', declareAnytime = false, players = 4 } = {}) {
+function rigged(hands, { deck = 54, turn = 'p0', declareAnytime = false, players = 4 } = {}) {
   const game = createGame({ seats: seats(players), deck, declareAnytime, rng: seeded(1) });
   for (const hand of game.hands.values()) hand.clear();
   const dealt = new Set();
@@ -40,22 +40,33 @@ function rigged(hands, { deck = 48, turn = 'p0', declareAnytime = false, players
 const LOW_SPADES = ['2S', '3S', '4S', '5S', '6S', '7S'];
 const HIGH_HEARTS = ['9H', '10H', 'JH', 'QH', 'KH', 'AH'];
 
-test('the decks split into sets of six', () => {
-  const small = buildSets(48);
-  const big = buildSets(54);
-  assert.equal(small.length, 8);
-  assert.equal(big.length, 9);
-  for (const set of big) {
-    assert.equal(set.cards.length, 6);
-    for (const card of set.cards) assert.equal(setIdOf(card), set.id);
+test('both decks split into nine sets, of six or of eight', () => {
+  for (const [deck, size] of [[54, 6], [72, 8]]) {
+    const sets = buildSets(deck);
+    assert.equal(sets.length, 9);
+    for (const set of sets) {
+      assert.equal(set.cards.length, size);
+      for (const card of set.cards) {
+        assert.equal(setIdOf(card), set.id);
+        assert.equal(typeof cardInfo(card).name, 'string');
+      }
+    }
+    const cards = sets.flatMap((s) => s.cards);
+    assert.equal(new Set(cards).size, deck);
+    assert.deepEqual(sortCards([...cards].reverse()), cards, 'sorting restores set and rank order');
   }
-  assert.equal(new Set(big.flatMap((s) => s.cards)).size, 54);
-  assert.ok(!small.flatMap((s) => s.cards).some((card) => card.startsWith('8') || card.endsWith('J')));
+  // The bigger deck is the smaller one plus a 0, 1, 11 and 12 per suit, with four suited jokers for the two plain ones.
+  const small = new Set(buildSets(54).flatMap((s) => s.cards));
+  const added = buildSets(72).flatMap((s) => s.cards).filter((card) => !small.has(card));
+  assert.deepEqual(sortCards(added).slice(0, 4), ['0S', '1S', '11S', '12S']);
+  assert.equal(added.length, 20);
+  assert.deepEqual(buildSets(72).at(-1).cards, ['8S', '8H', '8D', '8C', 'XS', 'XH', 'XD', 'XC']);
   assert.deepEqual(sortCards(['AS', 'RJ', '2S', '9S', '8C']), ['2S', '9S', 'AS', '8C', 'RJ']);
+  assert.equal(cardInfo('XH').name, 'Joker of Hearts');
 });
 
 test('dealing gives out every card and keeps the teams level', () => {
-  for (const deck of [48, 54]) {
+  for (const deck of [54, 72]) {
     for (const players of [4, 6, 8]) {
       const game = createGame({ seats: seats(players), deck, rng: seeded(deck + players) });
       const sizes = game.seats.map((seat) => game.hands.get(seat.id).size);
@@ -99,7 +110,8 @@ test('illegal asks are refused and change nothing', () => {
   refused('p0', 'nobody', '3S');
   refused('p0', 'p1', '2S'); // already holds it
   refused('p0', 'p1', '9D'); // holds nothing from that set
-  refused('p0', 'p1', '8S'); // not in the 48-card deck
+  refused('p0', 'p1', '8S'); // from a set that is no longer in play
+  refused('p0', 'p1', '0S'); // only exists in the 72-card deck
   refused('p0', 'p1', 'nonsense');
   assert.equal(game.turn, 'p0');
   assert.equal(game.log.length, 0);
@@ -216,7 +228,7 @@ test('random legal play always reaches the end with the cards accounted for', ()
   for (let seed = 1; seed <= 60; seed++) {
     const rng = seeded(seed);
     const players = [4, 6, 8][seed % 3];
-    const game = createGame({ seats: seats(players), deck: seed % 2 ? 54 : 48, declareAnytime: seed % 4 === 0, rng });
+    const game = createGame({ seats: seats(players), deck: seed % 2 ? 54 : 72, declareAnytime: seed % 4 === 0, rng });
     const pick = (items) => items[Math.floor(rng() * items.length)];
     for (let moves = 0; game.phase === 'playing'; moves++) {
       assert.ok(moves < 20_000, `seed ${seed} did not finish`);
@@ -244,7 +256,7 @@ test('bots only make legal moves and always finish a game', () => {
   for (let seed = 1; seed <= 150; seed++) {
     const rng = seeded(seed * 7919);
     const players = [4, 6, 8][seed % 3];
-    const game = createGame({ seats: seats(players), deck: seed % 2 ? 54 : 48, rng });
+    const game = createGame({ seats: seats(players), deck: seed % 2 ? 54 : 72, rng });
     for (let moves = 0; game.phase === 'playing'; moves++) {
       assert.ok(moves < 5000, `seed ${seed} did not finish`);
       const move = chooseMove(game, game.turn, rng);

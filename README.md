@@ -31,20 +31,21 @@ Rooms live in memory, so run a single instance, and expect games to end if the s
 ## How the game works here
 
 - 4, 6 or 8 players in two equal teams, seated alternately.
-- The deck is split into **sets** of six cards: the low cards (2–7) and high cards (9–A) of each suit.
+- The deck is split into nine **sets**: the low cards and the high cards of each suit, plus the four 8s
+  with the jokers.
 - On your turn you **ask** one opponent for one exact card. You must hold a card from the same set and
   can't ask for a card you already have. If they have it you take it and go again; if not, it's their turn.
-- You **declare** a set by saying which teammate holds each of its cards. All six right: your team wins
-  the set. Anything wrong: the other team gets it. Either way the cards leave play.
+- You **declare** a set by saying which teammate holds each of its cards. All of them right: your team
+  wins the set. Anything wrong: the other team gets it. Either way the cards leave play.
 - A player who runs out of cards hands the turn to the next teammate who has some. When a whole team is
   out of cards, the other team has to declare everything that's left.
-- Most sets wins.
+- Most sets wins. With nine sets there are no ties.
 
 The host picks the house rules in the lobby:
 
 | Rule | Options |
 | --- | --- |
-| Deck | **54 cards**: nine sets, the 8s and two jokers form the ninth, no ties possible. **48 cards**: eight sets, no 8s. |
+| Deck | **Nine sets of six** (54 cards): low is 2–7, high is 9–A, and the 8s plus two jokers make the ninth set. **Nine sets of eight** (72 cards): the same deck stretched with a 0, 1, 11 and 12 in every suit and four jokers, so low is 0–7 and high is 9–A. It gives 8 players nine cards each. |
 | Declaring | **On your turn** only, or **any time** by anyone. |
 | Question history | **Full log** for everyone, or the **last question only** as at a real table. |
 

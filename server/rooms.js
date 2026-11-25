@@ -16,7 +16,7 @@ const LOG_MAX = 300; // events sent to clients
 const CODE_LETTERS = 'BCDFGHJKLMNPQRSTVWXZ'; // no vowels, so codes never spell words
 const BOT_NAMES = ['Guppy', 'Minnow', 'Tetra', 'Koi', 'Pike', 'Trout', 'Perch', 'Bass'];
 // The first value of each setting is its default.
-const SETTING_VALUES = { deck: [54, 48], declare: ['turn', 'anytime'], history: ['full', 'last'] };
+const SETTING_VALUES = { deck: [54, 72], declare: ['turn', 'anytime'], history: ['full', 'last'] };
 
 function cleanName(raw) {
   const name = String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, 20).trim();
