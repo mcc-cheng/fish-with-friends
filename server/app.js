@@ -1,5 +1,6 @@
 // HTTP + WebSocket transport: serves the client files and feeds messages to Rooms.
 
+import { readdirSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -19,7 +20,27 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.txt': 'text/plain; charset=utf-8',
 };
+
+/**
+ * Has the server's own code changed on disk since this process loaded it?
+ * The page files are read fresh on every request, so after an update a server
+ * that was never restarted ends up serving a new page that expects things the
+ * old code can't do. This lets the page say so instead of quietly misbehaving.
+ */
+const loadedAt = Date.now();
+let staleCheck = { at: 0, stale: false };
+function codeIsStale() {
+  if (Date.now() - staleCheck.at > 3000) {
+    const newest = [path.join(ROOT, 'server'), SHARED]
+      .flatMap((dir) => readdirSync(dir).map((name) => statSync(path.join(dir, name)).mtimeMs))
+      .reduce((a, b) => Math.max(a, b), 0);
+    staleCheck = { at: Date.now(), stale: newest > loadedAt };
+  }
+  return staleCheck.stale;
+}
 
 async function serveStatic(req, res) {
   const send = (status, body, type = 'text/plain; charset=utf-8') => {
@@ -60,6 +81,7 @@ export function createApp({ dataDir = null, messagesPer10s = 200, ...options } =
   const rooms = new Rooms({
     ratings: new Ratings({ file: dataDir && path.join(dataDir, 'ratings.json') }),
     history: new History({ file: dataDir && path.join(dataDir, 'games.jsonl') }),
+    stale: codeIsStale,
     ...options,
   });
   const server = http.createServer(serveStatic);

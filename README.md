@@ -17,8 +17,12 @@ npm start          # http://localhost:3000
 ```
 
 `PORT` and `HOST` change where it listens, and `DATA_DIR` (default `./data`) is where ratings and the
-record of finished games are saved. `npm run dev` restarts the server when a file changes, and `npm test`
-runs the tests.
+record of finished games are saved. `npm test` runs the tests.
+
+**While the code is changing, use `npm run dev` instead of `npm start`.** It restarts the server whenever
+a server file changes. A server left running across an update keeps its old code in memory while serving
+the new page files, and the two don't match. If that happens the site shows a yellow notice asking for a
+restart: stop the server with Ctrl+C and start it again.
 
 To try it alone, create a game and add bots. To be several players at once, open the game's link in more
 tabs: while your first tab is connected, each extra tab joins as another player. (They share one profile,
@@ -107,6 +111,7 @@ among friends and not something to build a public ladder on.
 
 ```
 shared/cards.js   card and set definitions, used by server and browser
+public/fonts/     Nunito, the typeface, bundled under the SIL Open Font Licence (licence alongside)
 server/game.js    the rules: deal, ask, declare, turn passing, scoring (no networking)
 server/bot.js     computer player; works only from its hand and the public log
 server/ratings.js Elo arithmetic and the JSON file ratings are kept in

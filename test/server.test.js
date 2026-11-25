@@ -637,7 +637,8 @@ test('a profile holds the player’s games and totals, rated or not', async () =
   const adaWon = end.game.winner === 'A';
 
   let mine = await profileOf(host, ada);
-  assert.deepEqual(mine.stats, { games: 1, wins: adaWon ? 1 : 0, losses: adaWon ? 0 : 1, rated: 1 });
+  const { A, B } = end.game.score;
+  assert.deepEqual(mine.stats, { games: 1, wins: adaWon ? 1 : 0, losses: adaWon ? 0 : 1, rated: 1, setsWon: A, setsLost: B, streak: adaWon ? 1 : -1, bestStreak: adaWon ? 1 : 0 });
   assert.equal(mine.me.rating, adaWon ? 1016 : 984);
   const [game] = mine.games;
   assert.deepEqual(

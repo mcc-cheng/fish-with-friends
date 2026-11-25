@@ -1,3 +1,13 @@
+/* Nunito: a rounded, friendly face, used for everything. Bundled with the site
+   (public/fonts, SIL Open Font Licence) so nothing is fetched from elsewhere. */
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 200 1000;
+  font-display: swap;
+  src: url('/fonts/nunito.woff2') format('woff2');
+}
+
 /* Two themes from one set of rules: every colour below is a token, light by
    default, and <html data-theme="dark"> swaps them. */
 
@@ -10,8 +20,8 @@
   --line: #dcd9d1;
   --text: #1b1b19;
   --muted: #64625b;
-  --primary: #1b1b19; /* the one thing to press */
-  --primary-hover: #3a3934;
+  --primary: #0f766e; /* the thing to press, and whatever is selected */
+  --primary-hover: #0b5f59;
   --on-primary: #ffffff;
   --shadow: 0 1px 2px rgb(24 22 15 / 0.05), 0 8px 24px rgb(24 22 15 / 0.06);
 
@@ -44,8 +54,8 @@
   --name-s: 62%;
   --name-l: 36%;
 
-  --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
-  --radius: 16px;
+  --font: 'Nunito', ui-rounded, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --radius: 18px;
 }
 
 :root[data-theme='dark'] {
@@ -57,9 +67,9 @@
   --line: #2f333a;
   --text: #ecebe6;
   --muted: #a1a5ac;
-  --primary: #ecebe6;
-  --primary-hover: #ffffff;
-  --on-primary: #101114;
+  --primary: #5eead4;
+  --primary-hover: #8df3e2;
+  --on-primary: #06302b;
   --shadow: 0 10px 30px rgb(0 0 0 / 0.28);
 
   --A: #ffb066;
@@ -98,7 +108,7 @@ body {
   min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
-  font: 16px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font: 500 16px/1.45 var(--font);
 }
 
 h1,
@@ -110,8 +120,7 @@ p {
 
 h1,
 h2 {
-  font-family: var(--serif);
-  font-weight: 700;
+  font-weight: 800;
 }
 
 button,
@@ -131,7 +140,7 @@ button:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid var(--text);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
@@ -249,11 +258,11 @@ button:disabled {
 }
 
 .btn {
-  padding: 9px 16px;
+  padding: 9px 18px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 999px;
   background: var(--raised);
-  font-weight: 600;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -332,9 +341,9 @@ button:disabled {
 input[type='text'] {
   width: 100%;
   min-width: 0;
-  padding: 12px 14px;
+  padding: 12px 16px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 14px;
   background: var(--bg);
 }
 
@@ -349,10 +358,8 @@ input[type='text']::placeholder {
   border-radius: 999px;
   background: var(--hover);
   color: var(--muted);
-  font-size: 0.66rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -404,7 +411,6 @@ input[type='text']::placeholder {
   border-radius: 12% / 8.6%;
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--card-edge), var(--card-shadow);
-  font-family: var(--serif);
   font-weight: 700;
   line-height: 1;
   user-select: none;
@@ -446,7 +452,6 @@ input[type='text']::placeholder {
 }
 
 .card.joker .rank {
-  font-family: system-ui, sans-serif;
   font-size: 0.5rem;
   font-size: 18cqi;
   letter-spacing: 0.05em;
@@ -494,7 +499,7 @@ input[type='text']::placeholder {
 }
 
 .card.ghost.selected {
-  border: 2px solid var(--text);
+  border: 2px solid var(--primary);
   background: var(--surface);
   color: var(--ink);
   transform: translateY(-4px);
@@ -517,7 +522,6 @@ input[type='text']::placeholder {
   display: inline-flex;
   align-items: center;
   gap: 1px;
-  font-family: var(--serif);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -642,7 +646,7 @@ a.name:hover {
 }
 
 .lobby-tab[aria-selected='true'] {
-  border-bottom-color: var(--text);
+  border-bottom-color: var(--primary);
   color: var(--text);
 }
 
@@ -818,7 +822,7 @@ a.name:hover {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   gap: 10px;
 }
 
@@ -832,8 +836,8 @@ a.name:hover {
 }
 
 .stat-value {
-  font-family: var(--serif);
-  font-size: 2rem;
+  font-size: 1.8rem;
+  white-space: nowrap;
   font-variant-numeric: lining-nums tabular-nums;
   font-weight: 700;
   line-height: 1.1;
@@ -956,9 +960,9 @@ a.name:hover {
 .brand {
   margin-right: 2px;
   color: inherit;
-  font-family: var(--serif);
   font-size: 1.35rem;
-  font-weight: 700;
+  font-weight: 900;
+  letter-spacing: -0.01em;
   line-height: 1;
   text-decoration: none;
   white-space: nowrap;
@@ -1052,8 +1056,7 @@ a.icon-btn {
 .versus {
   align-self: center;
   color: var(--muted);
-  font-family: var(--serif);
-  font-style: italic;
+  font-weight: 800;
   text-align: center;
 }
 
@@ -1073,7 +1076,6 @@ a.icon-btn {
 
 .team-col .count {
   margin-left: auto;
-  font-family: system-ui, sans-serif;
   font-size: 0.85rem;
   font-weight: 400;
 }
@@ -1135,7 +1137,6 @@ a.icon-btn {
 }
 
 .settings h2 .small {
-  font-family: system-ui, sans-serif;
   font-weight: 400;
 }
 
@@ -1156,10 +1157,8 @@ a.icon-btn {
   margin-bottom: 6px;
   padding: 0;
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.85rem;
   font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
 }
 
 .option {
@@ -1177,9 +1176,9 @@ a.icon-btn {
 }
 
 .option.on {
-  border-color: var(--text);
+  border-color: var(--primary);
   background: var(--raised);
-  box-shadow: inset 0 0 0 1px var(--text);
+  box-shadow: inset 0 0 0 1px var(--primary);
 }
 
 .option.locked {
@@ -1193,7 +1192,7 @@ a.icon-btn {
 .option input {
   flex: none;
   margin: 4px 0 0;
-  accent-color: var(--text);
+  accent-color: var(--primary);
 }
 
 .option strong,
@@ -1270,7 +1269,6 @@ a.icon-btn {
 }
 
 .score-num {
-  font-family: var(--serif);
   font-size: 2.5rem;
   font-variant-numeric: lining-nums tabular-nums;
   font-weight: 700;
@@ -1334,11 +1332,8 @@ a.icon-btn {
   gap: 6px;
   margin-bottom: 6px;
   color: var(--muted);
-  font-family: system-ui, sans-serif;
-  font-size: 0.72rem;
+  font-size: 0.85rem;
   font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
 }
 
 .seat-row {
@@ -1400,10 +1395,8 @@ a.icon-btn {
   border-radius: 999px;
   background: var(--team-fill);
   color: var(--on-fill);
-  font-size: 0.66rem;
+  font-size: 0.72rem;
   font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -1418,7 +1411,6 @@ a.icon-btn {
   background: repeating-linear-gradient(45deg, var(--back) 0 3px, color-mix(in srgb, var(--back) 86%, #000) 3px 6px);
   box-shadow: inset 0 0 0 2px #fff, 0 1px 3px rgb(0 0 0 / 0.3);
   color: #fff;
-  font-family: var(--serif);
   font-size: 1rem;
   font-variant-numeric: lining-nums;
   font-weight: 700;
@@ -1505,7 +1497,8 @@ a.icon-btn {
 /* ---- your move ---- */
 
 .action.mine {
-  border-color: var(--text);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary), var(--shadow);
 }
 
 .action-head {
@@ -1577,10 +1570,8 @@ a.icon-btn {
 
 .step-label {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.9rem;
   font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
 }
 
 .pills {
@@ -1662,7 +1653,6 @@ a.icon-btn {
 }
 
 .hand .count {
-  font-family: system-ui, sans-serif;
   font-size: 0.85rem;
   font-weight: 400;
 }
@@ -1686,10 +1676,8 @@ a.icon-btn {
   gap: 6px;
   margin-bottom: 8px;
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.85rem;
   font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
 }
 
 .hand-set h3 .pip {
@@ -1857,17 +1845,57 @@ a.icon-btn {
 
 .toast {
   max-width: 480px;
-  padding: 10px 16px;
-  border-radius: 10px;
-  background: var(--primary);
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--text);
   box-shadow: 0 8px 30px rgb(0 0 0 / 0.3);
-  color: var(--on-primary);
+  color: var(--bg);
   font-weight: 600;
 }
 
 .toast.bad {
   background: #b3261e;
   color: #fff;
+}
+
+.statusbar.stale {
+  position: sticky;
+  top: 0;
+  padding: 10px 16px;
+  background: #ffd24a;
+  color: #2a2000;
+  font-weight: 500;
+}
+
+.statusbar code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.12);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.you-card {
+  display: grid;
+  gap: 2px;
+  padding: 14px 16px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.you-card:hover {
+  border-color: var(--primary);
+}
+
+.you-name {
+  font-size: 1.25rem;
+  font-weight: 800;
+}
+
+.you-link {
+  margin-top: 6px;
+  color: var(--primary);
+  font-weight: 700;
 }
 
 /* ---- screen sizes ---- */

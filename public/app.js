@@ -157,6 +157,7 @@ const state = {
   declAssign: {},
   fresh: new Set(), // cards that arrived in the latest update, so they can be animated in
   ratings: null, // { me, top }: this player's Elo standing and the leaderboard
+  stale: false, // the server is running older code than this page was written for
   toast: null,
   flashed: 0,
 };
@@ -209,6 +210,7 @@ function receive(msg) {
       const before = state.view ? (state.view.game?.hand ?? []) : null;
       state.fresh = new Set(before && msg.game ? msg.game.hand.filter((card) => !before.includes(card)) : []);
       state.view = msg;
+      state.stale = Boolean(msg.stale);
       state.busy = false;
       reconcile();
       break;
@@ -218,6 +220,7 @@ function receive(msg) {
       break;
     case 'lobby':
       state.lobby = { games: msg.games, yours: msg.yours, online: msg.online, played: msg.played };
+      state.stale = Boolean(msg.stale);
       state.ratings = { me: msg.me, top: msg.top };
       if (msg.chat) state.chat = msg.chat;
       break;
@@ -229,6 +232,12 @@ function receive(msg) {
       break;
     case 'error':
       state.busy = false;
+      if (msg.code === 'no-room' && !state.code) {
+        // We weren't in a room or heading for one, so this is a server that didn't understand
+        // our hello: one started before the lobby existed. Say so, and stay on this page.
+        state.stale = true;
+        break;
+      }
       if (msg.code === 'no-room') exitRoom();
       toast(msg.message, 'bad');
       break;
@@ -464,8 +473,20 @@ function screen() {
 }
 
 function statusBar() {
-  if (state.status === 'open' || (state.status === 'connecting' && !state.view)) return null;
-  return h('div', { class: 'statusbar', role: 'status' }, 'Connection lost. Reconnecting…');
+  if (state.status === 'closed' || (state.status === 'connecting' && state.view)) {
+    return h('div', { class: 'statusbar', role: 'status' }, 'Connection lost. Reconnecting…');
+  }
+  if (state.stale) {
+    return h(
+      'div',
+      { class: 'statusbar stale', role: 'status' },
+      h('strong', {}, 'The server needs a restart. '),
+      'It is running an older version of the game than this page, so parts of the site won’t work. In the terminal where it runs, press Ctrl+C, then run ',
+      h('code', {}, 'npm start'),
+      ' again.',
+    );
+  }
+  return null;
 }
 
 function toastEl() {
@@ -625,6 +646,7 @@ function lobbyScreen() {
           }),
           h('button', { class: 'btn', type: 'submit' }, 'Join'),
         ),
+        youCard(),
         h(
           'p',
           { class: 'lobby-stats' },
@@ -637,6 +659,19 @@ function lobbyScreen() {
       ),
     ),
     h('footer', { class: 'footer' }, h('a', { href: '/help' }, 'Help'), ' · ', h('a', { href: '/profile' }, 'Your profile')),
+  );
+}
+
+/** Who you are playing as, your rating at a glance, and the way to your profile. */
+function youCard() {
+  const me = state.ratings?.me;
+  return h(
+    'a',
+    { class: 'panel you-card', href: '/profile', title: 'Your profile: statistics and every game you have played' },
+    h('span', { class: 'muted small' }, 'Playing as'),
+    h('span', { class: 'you-name nm' }, state.name),
+    h('span', { class: 'muted small' }, me?.games ? `Rating ${me.rating} · ${me.wins} won, ${me.losses} lost` : 'No rated games yet'),
+    h('span', { class: 'you-link' }, 'Profile and statistics'),
   );
 }
 
@@ -726,7 +761,8 @@ function leaderboard() {
 
 function profileScreen() {
   const profile = state.profile;
-  const stats = profile?.stats ?? { games: 0, wins: 0, losses: 0, rated: 0 };
+  const stats = profile?.stats ?? { games: 0, wins: 0, losses: 0, rated: 0, setsWon: 0, setsLost: 0, streak: 0, bestStreak: 0 };
+  const streak = stats.streak > 0 ? `${stats.streak} won` : stats.streak < 0 ? `${-stats.streak} lost` : '–';
   const me = profile?.me;
   const stat = (label, value, note) => h('div', { class: 'stat' }, h('span', { class: 'stat-value' }, value), h('span', { class: 'stat-label' }, label), note ? h('span', { class: 'muted small' }, note) : null);
   const when = (time) => new Date(time).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
@@ -769,6 +805,8 @@ function profileScreen() {
             stat('Won', stats.wins),
             stat('Lost', stats.losses),
             stat('Win rate', stats.games ? `${Math.round((100 * stats.wins) / stats.games)}%` : '–'),
+            stat('Sets', `${stats.setsWon}–${stats.setsLost}`, 'won and lost'),
+            stat('Streak', streak, stats.bestStreak ? `best run: ${stats.bestStreak} won` : 'in a row'),
           )
         : h('p', { class: 'muted' }, 'Loading your record…'),
       profile

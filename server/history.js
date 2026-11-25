@@ -75,8 +75,24 @@ export class History {
   forPlayer(pid, limit = 200) {
     const games = (this.byPlayer.get(pid) ?? []).map((game) => seenBy(game, pid));
     const wins = games.filter((game) => game.won).length;
+    // Runs of wins: the longest ever, and the run the player is on now (negative for a run of losses).
+    let run = 0;
+    let bestStreak = 0;
+    for (const game of games) {
+      run = game.won ? Math.max(run, 0) + 1 : Math.min(run, 0) - 1;
+      bestStreak = Math.max(bestStreak, run);
+    }
     return {
-      stats: { games: games.length, wins, losses: games.length - wins, rated: games.filter((game) => game.rated).length },
+      stats: {
+        games: games.length,
+        wins,
+        losses: games.length - wins,
+        rated: games.filter((game) => game.rated).length,
+        setsWon: games.reduce((sum, game) => sum + game.score[0], 0),
+        setsLost: games.reduce((sum, game) => sum + game.score[1], 0),
+        streak: run,
+        bestStreak,
+      },
       games: games.reverse().slice(0, limit),
     };
   }

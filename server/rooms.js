@@ -69,6 +69,7 @@ export class Rooms {
       graceMs: 30_000, // how long a dropped connection keeps its place before others move on
       emptyTtlMs: 20 * 60_000, // how long a room with nobody connected survives
       lobbyDelayMs: 150, // lobby updates are batched over this long
+      stale: () => false, // whether newer server code is waiting on disk for a restart
       maxRooms: 1000,
       rng: Math.random,
       ...options,
@@ -141,6 +142,7 @@ export class Rooms {
       t: 'lobby',
       games: rooms.filter((room) => room.public && someoneHere(room)).slice(0, LOBBY_GAMES_MAX).map((room) => this.listing(room)),
       yours: rooms.filter(mine).slice(0, LOBBY_GAMES_MAX).map((room) => this.listing(room)),
+      stale: this.options.stale(),
       online: new Set([...this.conns].map((c) => c.pid ?? c)).size,
       played: this.history.count,
       me: conn.pid ? this.ratings.profile(conn.pid) : null,
@@ -516,6 +518,7 @@ export class Rooms {
     return {
       t: 'state',
       code: room.code,
+      stale: this.options.stale(),
       public: room.public,
       phase: game ? game.phase : 'lobby',
       hostId: room.hostId,
