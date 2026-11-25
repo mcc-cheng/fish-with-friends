@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { Ratings } from './ratings.js';
 import { Rooms } from './rooms.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,8 +49,12 @@ async function serveStatic(req, res) {
   }
 }
 
-export function createApp(options = {}) {
-  const rooms = new Rooms(options);
+/**
+ * @param {object} options  Options for Rooms, plus `ratingsFile`: where Elo
+ *   ratings are saved. Without it they last only as long as the process.
+ */
+export function createApp({ ratingsFile = null, ...options } = {}) {
+  const rooms = new Rooms({ ratings: new Ratings({ file: ratingsFile }), ...options });
   const server = http.createServer(serveStatic);
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 8 * 1024 });
 

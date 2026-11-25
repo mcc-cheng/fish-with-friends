@@ -3,7 +3,8 @@
 An online version of **Fish** (also called Literature or Canadian Fish), the team card game where you ask
 opponents for cards, keep track of who has what, and declare whole sets.
 
-Create a room, send the link to your friends, pick teams and play. Bots can fill empty seats.
+Create a room, send the link to your friends, pick teams and play. Bots can fill empty seats, and games
+between people are Elo-rated.
 
 ## Run it
 
@@ -14,8 +15,8 @@ npm install
 npm start          # http://localhost:3000
 ```
 
-`PORT` and `HOST` change where it listens. `npm run dev` restarts the server when a file changes, and
-`npm test` runs the tests.
+`PORT` and `HOST` change where it listens, and `DATA_DIR` (default `./data`) is where ratings are saved.
+`npm run dev` restarts the server when a file changes, and `npm test` runs the tests.
 
 To try it alone, open the room link in a few browser tabs (each tab is a separate player), or add bots in
 the lobby.
@@ -26,7 +27,9 @@ The server is one Node process that serves the page and a WebSocket at `/ws`. Pu
 Node and allows WebSockets (Render, Fly.io, Railway, a VPS), or expose your own machine with a tunnel such
 as `cloudflared tunnel --url http://localhost:3000`.
 
-Rooms live in memory, so run a single instance, and expect games to end if the server restarts.
+Rooms live in memory, so run a single instance, and expect games to end if the server restarts. Ratings
+are the one thing written to disk (`data/ratings.json`); on a host with a throwaway filesystem, point
+`DATA_DIR` at a persistent volume or they reset on every deploy.
 
 ## How the game works here
 
@@ -52,17 +55,42 @@ The host picks the house rules in the lobby:
 Dropping out doesn't lose your seat: reloading or reconnecting puts you back in it. If someone is gone for
 good, the host can let a bot play their cards, or anyone who opens the room link can take over the seat.
 
+Cards use a four-colour deck: spades black, hearts red, diamonds blue, clubs green. The page follows your
+system's light or dark setting, and the button in the top corner switches between them.
+
+## Ratings
+
+Every player has an Elo rating, starting at 1000, shown beside their name in the lobby. The home page has
+the leaderboard.
+
+- **Who you are.** There are no accounts. Each browser keeps a random key, and the server stores your
+  rating under a hash of it. Clearing site data or switching browser starts you again at 1000, and two
+  people can have the same name on the leaderboard.
+- **Which games count.** A game is rated when each team has at least one human player and nobody is in two
+  seats (two tabs of one browser are the same player). Anything else is a practice game, and the lobby
+  says which it will be. A game the host ends early changes nothing.
+- **How much moves.** A team's rating is the average of its players, with bots counted as 1000. The
+  winners' expected score is `1 / (1 + 10^((losers - winners) / 400))`, and every winner gains
+  `32 x (1 - expected)` points, rounded, which every loser drops. Evenly matched teams move 16; beating a
+  stronger team is worth more. The margin in sets doesn't matter.
+- **Who gets the points.** Whoever was seated when the game started, even if they leave or someone takes
+  over their seat.
+
+Ratings rest on trust: anyone could open two browsers and feed one rating from the other. That is fine
+among friends and not something to build a public ladder on.
+
 ## Code map
 
 ```
 shared/cards.js   card and set definitions, used by server and browser
 server/game.js    the rules: deal, ask, declare, turn passing, scoring (no networking)
 server/bot.js     computer player; works only from its hand and the public log
-server/rooms.js   rooms, lobby, reconnects, and the per-player view of a game
+server/ratings.js Elo arithmetic and the JSON file ratings are kept in
+server/rooms.js   rooms, lobby, reconnects, ratings hooks, and the per-player view of a game
 server/app.js     HTTP static files + WebSocket transport
 server/index.js   entry point
 public/           the browser client (plain ES modules, no build step)
-test/             rules tests, bot self-play, and end-to-end tests over real WebSockets
+test/             rules, bot self-play, ratings, and end-to-end tests over real WebSockets
 ```
 
 The server is the only authority: clients send `ask` and `declare` messages, the server checks them

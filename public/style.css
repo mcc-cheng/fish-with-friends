@@ -1,26 +1,81 @@
-/* A card table: green felt, ivory cards and controls, one colour per team. */
+/* Two themes from one set of rules: every colour below is a token, light by
+   default, and <html data-theme="dark"> swaps them. */
 
 :root {
-  color-scheme: dark;
-  --felt-hi: #1d6449;
-  --felt: #0f4231;
-  --felt-lo: #06241a;
-  --surface: rgb(2 20 14 / 0.46); /* panels resting on the felt */
-  --raised: rgb(255 255 255 / 0.075); /* things inside panels */
-  --line: rgb(255 255 255 / 0.13);
-  --text: #f6f2e7;
-  --muted: #a9c0b3;
-  --ivory: #f6f2e7;
-  --ink: #0d2a20; /* text on ivory and on team colours */
-  --A: #ffb066;
-  --B: #86c8ff;
-  --good: #8ee6ad;
-  --bad: #ff9f93;
-  --card: #fcf9f0;
-  --card-ink: #1b1f24;
-  --card-red: #c5202f;
+  color-scheme: light;
+  --bg: #f4f3ef;
+  --surface: #ffffff; /* panels */
+  --raised: #f1f0eb; /* rows and controls inside panels */
+  --hover: #e6e4dd;
+  --line: #dcd9d1;
+  --text: #1b1b19;
+  --muted: #64625b;
+  --primary: #1b1b19; /* the one thing to press */
+  --primary-hover: #3a3934;
+  --on-primary: #ffffff;
+  --shadow: 0 1px 2px rgb(24 22 15 / 0.05), 0 8px 24px rgb(24 22 15 / 0.06);
+
+  /* Teams: a colour for text and outlines, a fill for solid shapes, and the text that sits on a fill. */
+  --A: #ad5a00;
+  --A-fill: #f9aa53;
+  --B: #8a3fd1;
+  --B-fill: #c5a3ff;
+  --on-fill: #17130e;
+
+  --good: #1a7f3f;
+  --bad: #c43b2e;
+
+  /* A four-colour deck. These are the suit colours on the page itself... */
+  --suit-S: #1b1b19;
+  --suit-H: #d1242f;
+  --suit-D: #1b62d4;
+  --suit-C: #177f3d;
+  /* ...and these on the face of a card, which is pale in both themes. */
+  --card: #ffffff;
+  --card-edge: #d5d2c9;
+  --card-shadow: 0 1px 2px rgb(24 22 15 / 0.14), 0 4px 10px rgb(24 22 15 / 0.08);
+  --face-S: #15151a;
+  --face-H: #d1242f;
+  --face-D: #1b62d4;
+  --face-C: #177f3d;
+  --ghost-line: #c2beb3; /* outline of a card you don't hold */
+  --back: #3b4252; /* the back of a card */
+
   --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
   --radius: 16px;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #101114;
+  --surface: #191b1f;
+  --raised: #23262b;
+  --hover: #2d3138;
+  --line: #2f333a;
+  --text: #ecebe6;
+  --muted: #a1a5ac;
+  --primary: #ecebe6;
+  --primary-hover: #ffffff;
+  --on-primary: #101114;
+  --shadow: 0 10px 30px rgb(0 0 0 / 0.28);
+
+  --A: #ffb066;
+  --A-fill: #ffb066;
+  --B: #c4a4ff;
+  --B-fill: #c4a4ff;
+
+  --good: #7fdc9f;
+  --bad: #ff9f93;
+
+  --suit-S: #ecebe6;
+  --suit-H: #ff7f7f;
+  --suit-D: #7ab1ff;
+  --suit-C: #6fd28f;
+  --card: #f5f4ef;
+  --card-edge: transparent;
+  --card-shadow: 0 1px 0 rgb(0 0 0 / 0.5), 0 6px 14px rgb(0 0 0 / 0.35);
+  --ghost-line: #474c55;
+  --back: #4b5364;
 }
 
 *,
@@ -36,20 +91,9 @@ html {
 body {
   margin: 0;
   min-height: 100dvh;
-  background: var(--felt-lo);
+  background: var(--bg);
   color: var(--text);
   font: 16px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-}
-
-/* The felt: lit from above, with a fine grain. Fixed, so it stays put while the page scrolls. */
-body::before {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
-    radial-gradient(120% 85% at 50% 0%, var(--felt-hi) 0%, var(--felt) 48%, var(--felt-lo) 100%);
-  content: '';
 }
 
 h1,
@@ -82,7 +126,7 @@ button:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid var(--ivory);
+  outline: 2px solid var(--text);
   outline-offset: 2px;
 }
 
@@ -109,10 +153,12 @@ button:disabled {
 
 .team-A {
   --team: var(--A);
+  --team-fill: var(--A-fill);
 }
 
 .team-B {
   --team: var(--B);
+  --team-fill: var(--B-fill);
 }
 
 /* ---- suit marks and icons: shapes cut out of the current text colour ---- */
@@ -157,6 +203,31 @@ button:disabled {
   --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 6l12 12M18 6L6 18' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E");
 }
 
+.icon-sun {
+  --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='4.4'/%3E%3Cpath d='M12 2.2v2.6M12 19.2v2.6M2.2 12h2.6M19.2 12h2.6M5.1 5.1l1.8 1.8M17.1 17.1l1.8 1.8M5.1 18.9l1.8-1.8M17.1 6.9l1.8-1.8' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+.icon-moon {
+  --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M20.6 13.4A8.8 8.8 0 1 1 10.6 3.4a7.6 7.6 0 0 0 10 10z'/%3E%3C/svg%3E");
+}
+
+/* A suit mark standing on the page takes its suit's colour. */
+.pip.suit-S {
+  color: var(--suit-S);
+}
+
+.pip.suit-H {
+  color: var(--suit-H);
+}
+
+.pip.suit-D {
+  color: var(--suit-D);
+}
+
+.pip.suit-C {
+  color: var(--suit-C);
+}
+
 /* ---- shared controls ---- */
 
 .panel {
@@ -164,7 +235,7 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 12px 30px rgb(0 0 0 / 0.16);
+  box-shadow: var(--shadow);
 }
 
 .stack {
@@ -182,7 +253,7 @@ button:disabled {
 }
 
 .btn:hover:not(:disabled) {
-  background: rgb(255 255 255 / 0.14);
+  background: var(--hover);
 }
 
 .btn:active:not(:disabled) {
@@ -195,14 +266,13 @@ button:disabled {
 
 .btn.primary {
   border-color: transparent;
-  background: linear-gradient(#fffdf6, #ebe4cf);
-  box-shadow: 0 2px 0 rgb(0 0 0 / 0.35), 0 8px 22px rgb(0 0 0 / 0.22);
-  color: var(--ink);
+  background: var(--primary);
+  color: var(--on-primary);
   font-weight: 700;
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: linear-gradient(#ffffff, #f4eedd);
+  background: var(--primary-hover);
 }
 
 .btn.big {
@@ -217,7 +287,7 @@ button:disabled {
 }
 
 .btn.quiet:hover:not(:disabled) {
-  background: var(--raised);
+  background: var(--hover);
   color: var(--text);
 }
 
@@ -227,11 +297,29 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+.icon-btn {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+
+.icon-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
 .link {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--ivory);
+  color: var(--text);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
@@ -242,18 +330,19 @@ input[type='text'] {
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgb(0 0 0 / 0.28);
+  background: var(--bg);
 }
 
 input[type='text']::placeholder {
-  color: rgb(169 192 179 / 0.6);
+  color: var(--muted);
+  opacity: 0.7;
 }
 
 .tag {
   flex: none;
   padding: 2px 7px;
   border-radius: 999px;
-  background: rgb(255 255 255 / 0.1);
+  background: var(--hover);
   color: var(--muted);
   font-size: 0.66rem;
   font-weight: 700;
@@ -263,7 +352,7 @@ input[type='text']::placeholder {
 }
 
 .tag.warn {
-  background: rgb(255 159 147 / 0.16);
+  background: color-mix(in srgb, var(--bad) 15%, transparent);
   color: var(--bad);
 }
 
@@ -284,7 +373,7 @@ input[type='text']::placeholder {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--team);
+  background: var(--team-fill);
 }
 
 .who {
@@ -293,7 +382,8 @@ input[type='text']::placeholder {
 }
 
 /* ---- playing cards ----
-   A card is a size container, so its rank and suit scale with whatever width it is given. */
+   A card is a size container, so its rank and suit scale with whatever width it is given.
+   Its colour comes from its suit: spades black, hearts red, diamonds blue, clubs green. */
 
 .card {
   container-type: inline-size;
@@ -307,13 +397,32 @@ input[type='text']::placeholder {
   padding: 0;
   border: 0;
   border-radius: 12% / 8.6%;
-  background: linear-gradient(165deg, #fffefa, #f0e9d7);
-  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.08), 0 1px 0 rgb(0 0 0 / 0.45), 0 6px 14px rgb(0 0 0 / 0.3);
-  color: var(--card-ink);
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--card-edge), var(--card-shadow);
   font-family: var(--serif);
   font-weight: 700;
   line-height: 1;
   user-select: none;
+}
+
+.card.suit-S,
+.chip.suit-S {
+  color: var(--face-S);
+}
+
+.card.suit-H,
+.chip.suit-H {
+  color: var(--face-H);
+}
+
+.card.suit-D,
+.chip.suit-D {
+  color: var(--face-D);
+}
+
+.card.suit-C,
+.chip.suit-C {
+  color: var(--face-C);
 }
 
 .card .rank {
@@ -329,10 +438,6 @@ input[type='text']::placeholder {
   height: 36cqi;
   margin-top: 0.1rem;
   margin-top: 5cqi;
-}
-
-.card.red {
-  color: var(--card-red);
 }
 
 .card.joker .rank {
@@ -351,35 +456,42 @@ input[type='text']::placeholder {
   width: 34px;
 }
 
-/* A card you don't hold. On your turn these become buttons for choosing what to ask for. */
+/* A card you don't hold: an outline in a faded version of its suit colour.
+   On your turn these become buttons for choosing what to ask for. */
 .card.ghost {
-  border: 1.5px dashed rgb(255 255 255 / 0.22);
-  background: rgb(0 0 0 / 0.16);
+  --ink: var(--suit-S);
+  border: 1.5px dashed var(--ghost-line);
+  background: none;
   box-shadow: none;
-  color: rgb(246 242 231 / 0.4);
+  color: color-mix(in srgb, var(--ink) 42%, transparent);
 }
 
-.card.ghost.red {
-  color: rgb(255 150 140 / 0.55);
+.card.ghost.suit-H {
+  --ink: var(--suit-H);
+}
+
+.card.ghost.suit-D {
+  --ink: var(--suit-D);
+}
+
+.card.ghost.suit-C {
+  --ink: var(--suit-C);
 }
 
 .card.ghost.pickable {
-  border-color: rgb(255 255 255 / 0.55);
-  color: var(--ivory);
-}
-
-.card.ghost.pickable.red {
-  color: #ffaca2;
+  border-color: var(--muted);
+  color: color-mix(in srgb, var(--ink) 72%, transparent);
 }
 
 .card.ghost.pickable:not(.selected):hover {
   border-style: solid;
-  background: rgb(255 255 255 / 0.1);
+  background: var(--hover);
 }
 
 .card.ghost.selected {
-  border: 2px solid var(--ivory);
-  background: rgb(246 242 231 / 0.2);
+  border: 2px solid var(--text);
+  background: var(--surface);
+  color: var(--ink);
   transform: translateY(-4px);
 }
 
@@ -409,7 +521,7 @@ input[type='text']::placeholder {
   padding: 0 5px 0 6px;
   border-radius: 5px;
   background: var(--card);
-  color: var(--card-ink);
+  box-shadow: inset 0 0 0 1px var(--card-edge);
   line-height: 1.4;
 }
 
@@ -419,16 +531,19 @@ input[type='text']::placeholder {
   height: 0.82em;
 }
 
-.chip.red {
-  color: var(--card-red);
-}
-
 /* ---- home ---- */
 
 .home {
+  position: relative;
   max-width: 440px;
   margin: 0 auto;
   padding: clamp(24px, 7vh, 64px) 16px 48px;
+}
+
+.corner {
+  position: absolute;
+  top: 10px;
+  right: 12px;
 }
 
 .fan {
@@ -516,6 +631,65 @@ input[type='text']::placeholder {
   font-weight: 400;
 }
 
+/* ---- leaderboard ---- */
+
+.board {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.board-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-list:empty {
+  display: none;
+}
+
+.board-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 9px;
+}
+
+.board-list li.you {
+  background: var(--raised);
+}
+
+.board-rank {
+  flex: none;
+  width: 1.4em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.board-record {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.board-rating,
+.rating {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.board-rating {
+  flex: none;
+  width: 3em;
+  text-align: right;
+}
+
 .rules {
   margin-top: 22px;
   color: var(--muted);
@@ -546,13 +720,14 @@ input[type='text']::placeholder {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--line);
-  background: rgb(2 20 14 / 0.4);
+  background: var(--surface);
 }
 
 .brand {
+  margin-right: 2px;
   font-family: var(--serif);
   font-size: 1.35rem;
   font-weight: 700;
@@ -573,7 +748,7 @@ input[type='text']::placeholder {
 }
 
 .room-pill:hover {
-  background: rgb(255 255 255 / 0.14);
+  background: var(--hover);
 }
 
 .room-pill strong {
@@ -614,6 +789,10 @@ input[type='text']::placeholder {
   margin-top: 12px;
 }
 
+.invite-row input {
+  background: var(--surface);
+}
+
 .teams {
   display: grid;
   gap: 10px;
@@ -631,7 +810,7 @@ input[type='text']::placeholder {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  border-top: 3px solid var(--team);
+  border-top: 3px solid var(--team-fill);
 }
 
 .team-col h2 {
@@ -662,8 +841,8 @@ input[type='text']::placeholder {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 42px;
-  padding: 6px 6px 6px 12px;
+  min-height: 44px;
+  padding: 5px 6px 5px 12px;
   border-radius: 10px;
   background: var(--raised);
 }
@@ -673,23 +852,24 @@ input[type='text']::placeholder {
   background: none;
 }
 
-.icon-btn {
-  display: grid;
-  flex: none;
-  place-items: center;
-  width: 30px;
-  height: 30px;
+/* Rating, then the remove button, pushed to the right-hand end of the row. */
+.roster .rating,
+.roster .icon-btn {
   margin-left: auto;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: var(--muted);
-  font-size: 0.8rem;
 }
 
-.icon-btn:hover {
-  background: rgb(255 255 255 / 0.1);
-  color: var(--text);
+.roster .rating {
+  padding-right: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.roster .rating + .icon-btn {
+  margin-left: 0;
+}
+
+.roster .icon-btn {
+  font-size: 0.8rem;
 }
 
 .team-actions {
@@ -738,13 +918,17 @@ input[type='text']::placeholder {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: var(--raised);
   cursor: pointer;
 }
 
+.option:hover:not(.locked, .on) {
+  background: var(--raised);
+}
+
 .option.on {
-  border-color: var(--ivory);
-  background: rgb(246 242 231 / 0.12);
+  border-color: var(--text);
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--text);
 }
 
 .option.locked {
@@ -758,7 +942,7 @@ input[type='text']::placeholder {
 .option input {
   flex: none;
   margin: 4px 0 0;
-  accent-color: var(--ivory);
+  accent-color: var(--text);
 }
 
 .option strong,
@@ -857,7 +1041,7 @@ input[type='text']::placeholder {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgb(0 0 0 / 0.2);
+  background: var(--raised);
   font-size: 0.76rem;
   white-space: nowrap;
 }
@@ -867,7 +1051,6 @@ input[type='text']::placeholder {
   width: 0.95rem;
   height: 0.95rem;
   margin: 0 6px 0 9px;
-  color: var(--ivory);
 }
 
 .seg {
@@ -882,8 +1065,8 @@ input[type='text']::placeholder {
 }
 
 .seg.claimed {
-  background: var(--team);
-  color: var(--ink);
+  background: var(--team-fill);
+  color: var(--on-fill);
   font-weight: 700;
 }
 
@@ -921,15 +1104,15 @@ input[type='text']::placeholder {
   min-height: 62px;
   padding: 8px 10px 8px 12px;
   border: 1px solid var(--line);
-  border-left: 4px solid var(--team);
+  border-left: 4px solid var(--team-fill);
   border-radius: 12px;
   background: var(--surface);
 }
 
 .seat.turn {
-  border-color: var(--team);
-  background: color-mix(in srgb, var(--team) 16%, rgb(2 20 14 / 0.6));
-  box-shadow: 0 0 0 1px var(--team), 0 0 26px color-mix(in srgb, var(--team) 32%, transparent);
+  border-color: var(--team-fill);
+  background: color-mix(in srgb, var(--team-fill) 16%, var(--surface));
+  box-shadow: 0 0 0 1px var(--team-fill), 0 0 22px color-mix(in srgb, var(--team-fill) 30%, transparent);
 }
 
 .seat.out {
@@ -964,8 +1147,8 @@ input[type='text']::placeholder {
   justify-self: start;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--team);
-  color: var(--ink);
+  background: var(--team-fill);
+  color: var(--on-fill);
   font-size: 0.66rem;
   font-weight: 800;
   letter-spacing: 0.05em;
@@ -981,8 +1164,8 @@ input[type='text']::placeholder {
   width: 30px;
   aspect-ratio: 5 / 7;
   border-radius: 5px;
-  background: repeating-linear-gradient(45deg, #26507f 0 3px, #214670 3px 6px);
-  box-shadow: inset 0 0 0 2px var(--card), 0 2px 6px rgb(0 0 0 / 0.35);
+  background: repeating-linear-gradient(45deg, var(--back) 0 3px, color-mix(in srgb, var(--back) 86%, #000) 3px 6px);
+  box-shadow: inset 0 0 0 2px #fff, 0 1px 3px rgb(0 0 0 / 0.3);
   color: #fff;
   font-family: var(--serif);
   font-size: 1rem;
@@ -994,7 +1177,9 @@ input[type='text']::placeholder {
 
 .seat.out .held {
   background: none;
-  box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.3);
+  box-shadow: inset 0 0 0 1.5px var(--ghost-line);
+  color: var(--muted);
+  text-shadow: none;
 }
 
 /* ---- what just happened ---- */
@@ -1036,7 +1221,7 @@ input[type='text']::placeholder {
 /* ---- your move ---- */
 
 .action.mine {
-  border-color: rgb(246 242 231 / 0.6);
+  border-color: var(--text);
 }
 
 .action-head {
@@ -1059,7 +1244,7 @@ input[type='text']::placeholder {
   padding: 3px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgb(0 0 0 / 0.25);
+  background: var(--raised);
 }
 
 .tab {
@@ -1072,8 +1257,8 @@ input[type='text']::placeholder {
 }
 
 .tab[aria-selected='true'] {
-  background: var(--ivory);
-  color: var(--ink);
+  background: var(--primary);
+  color: var(--on-primary);
 }
 
 .tab:disabled {
@@ -1134,17 +1319,27 @@ input[type='text']::placeholder {
 }
 
 .pill[class*='team-'] {
-  border-color: color-mix(in srgb, var(--team) 65%, transparent);
+  border-color: var(--team-fill);
 }
 
 .pill[aria-pressed='false']:hover:not(:disabled) {
-  background: rgb(255 255 255 / 0.14);
+  background: var(--hover);
 }
 
+/* A pressed set is filled like the primary button; a pressed player, with their team's colour. */
 .pill[aria-pressed='true'] {
   border-color: transparent;
-  background: var(--team, var(--ivory));
-  color: var(--ink);
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+.pill[class*='team-'][aria-pressed='true'] {
+  background: var(--team-fill);
+  color: var(--on-fill);
+}
+
+.pill[aria-pressed='true'] .pip {
+  color: inherit;
 }
 
 .pill:disabled {
@@ -1198,7 +1393,7 @@ input[type='text']::placeholder {
   padding: 10px 12px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: var(--surface);
+  background: var(--raised); /* a recessed tray, so the cards you hold stand out from the empty slots */
 }
 
 .hand-set h3 {
@@ -1216,7 +1411,6 @@ input[type='text']::placeholder {
 .hand-set h3 .pip {
   width: 0.95rem;
   height: 0.95rem;
-  color: var(--ivory);
 }
 
 .hand-set h3 .count {
@@ -1261,11 +1455,11 @@ input[type='text']::placeholder {
   display: flex;
   gap: 8px;
   padding: 6px 4px;
-  border-bottom: 1px solid rgb(255 255 255 / 0.06);
+  border-bottom: 1px solid var(--line);
 }
 
 .log-list li.declared {
-  background: rgb(255 255 255 / 0.06);
+  background: var(--raised);
 }
 
 .log-list .icon {
@@ -1286,7 +1480,7 @@ input[type='text']::placeholder {
 
 .result {
   padding: 28px 16px;
-  border-top: 4px solid var(--team, var(--line));
+  border-top: 4px solid var(--team-fill, var(--line));
   text-align: center;
 }
 
@@ -1294,6 +1488,55 @@ input[type='text']::placeholder {
   margin-bottom: 6px;
   color: var(--team, var(--text));
   font-size: 2rem;
+}
+
+/* Who gained and lost rating points. */
+.changes {
+  display: grid;
+  gap: 2px;
+  max-width: 340px;
+  margin: 16px auto 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.changes li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 9px;
+}
+
+.changes li.you {
+  background: var(--raised);
+}
+
+.changes .delta {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.changes .up {
+  color: var(--good);
+}
+
+.changes .down {
+  color: var(--bad);
+}
+
+.changes .after {
+  flex: none;
+  width: 3em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.result > .small {
+  margin-top: 8px;
 }
 
 .result-actions {
@@ -1311,7 +1554,8 @@ input[type='text']::placeholder {
   inset: 0 0 auto;
   z-index: 10;
   padding: 6px 12px;
-  background: #8a2f2f;
+  background: #b3261e;
+  color: #fff;
   font-size: 0.9rem;
   font-weight: 600;
   text-align: center;
@@ -1331,15 +1575,15 @@ input[type='text']::placeholder {
   max-width: 480px;
   padding: 10px 16px;
   border-radius: 10px;
-  background: var(--card);
-  box-shadow: 0 8px 30px rgb(0 0 0 / 0.45);
-  color: var(--ink);
+  background: var(--primary);
+  box-shadow: 0 8px 30px rgb(0 0 0 / 0.3);
+  color: var(--on-primary);
   font-weight: 600;
 }
 
 .toast.bad {
-  background: #ffdcd7;
-  color: #6d1313;
+  background: #b3261e;
+  color: #fff;
 }
 
 /* ---- screen sizes ---- */
@@ -1366,8 +1610,7 @@ input[type='text']::placeholder {
     bottom: 8px;
     z-index: 5;
     padding: 12px 14px;
-    background: #082a1f;
-    box-shadow: 0 -8px 24px rgb(0 0 0 / 0.4);
+    box-shadow: 0 -8px 24px rgb(0 0 0 / 0.22);
   }
 }
 

@@ -7,7 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import { sortCards } from '../shared/cards.js';
 import { chooseMove } from './bot.js';
-import { ask, createGame, declare, shuffle } from './game.js';
+import { ask, createGame, declare, otherTeam, shuffle } from './game.js';
+import { Ratings, playerId } from './ratings.js';
 
 export const TEAM_MIN = 2;
 export const TEAM_MAX = 4;
@@ -40,6 +41,7 @@ function timer(fn, ms) {
 export class Rooms {
   constructor(options = {}) {
     this.rooms = new Map();
+    this.ratings = options.ratings ?? new Ratings();
     this.options = {
       botDelay: [1200, 2200], // ms a bot "thinks" before moving: [min, max]
       graceMs: 30_000, // how long a dropped connection keeps its place before others move on
@@ -54,6 +56,11 @@ export class Rooms {
 
   handle(conn, msg) {
     if (!msg || typeof msg.t !== 'string') return;
+    // Any message may carry the browser's player secret; it decides whose rating this connection plays for.
+    if ('player' in msg) conn.pid = playerId(msg.player);
+    if (msg.t === 'hello') {
+      return conn.send({ t: 'ratings', me: conn.pid ? this.ratings.profile(conn.pid) : null, top: this.ratings.leaderboard(20, conn.pid) });
+    }
     if (msg.t === 'create') return this.create(conn, msg);
     if (msg.t === 'join') return this.join(conn, msg);
     const { room, member } = conn;
@@ -92,10 +99,11 @@ export class Rooms {
       game: null,
       botTimer: null,
       botKey: null,
+      rating: null, // set when a game starts: who is playing for rating points, and the outcome
       ttlTimer: null,
     };
     this.rooms.set(code, room);
-    const member = this.addMember(room, { name: msg.name, team: 'A' });
+    const member = this.addMember(room, { name: msg.name, team: 'A', pid: conn.pid });
     room.hostId = member.id;
     this.attach(conn, room, member);
     this.broadcast(room);
@@ -111,17 +119,18 @@ export class Rooms {
     if (!member) {
       if (room.members.size >= ROOM_MAX) return conn.send({ t: 'error', message: 'That room is full.' });
       // Arriving mid-game means watching; in the lobby you land on the smaller team.
-      member = this.addMember(room, { name: msg.name, team: room.game ? null : this.openTeam(room) });
+      member = this.addMember(room, { name: msg.name, team: room.game ? null : this.openTeam(room), pid: conn.pid });
     }
     this.attach(conn, room, member);
     this.pickHost(room);
     this.broadcast(room);
   }
 
-  addMember(room, { name, team = null, isBot = false }) {
+  addMember(room, { name, team = null, isBot = false, pid = null }) {
     const member = {
       id: `p${room.nextId++}`,
       token: isBot ? null : randomUUID(),
+      pid: pid ?? null, // rating identity; null for bots and for guests whose browser sent none
       name: uniqueName(room, cleanName(name)),
       team,
       isBot,
@@ -288,6 +297,12 @@ export class Rooms {
         if (a.length < TEAM_MIN) return `Each team needs at least ${TEAM_MIN} players.`;
         // Seats alternate teams around the table.
         const [first, second] = rng() < 0.5 ? [a, b] : [b, a];
+        // Ratings go to whoever sat down at the start, even if they leave or someone takes over their seat.
+        room.rating = {
+          unrated: this.unratedReason(room),
+          players: [...a, ...b].map((m) => ({ pid: m.pid, name: m.name, team: m.team })),
+          changes: null,
+        };
         room.game = createGame({
           seats: first.flatMap((m, i) => [m, second[i]]),
           deck: room.settings.deck,
@@ -301,14 +316,18 @@ export class Rooms {
         if (!game) return 'There is no game in progress.';
         if (!this.seated(room, me)) return 'You are watching this game.';
         const result = ask(game, me.id, msg.target, msg.card);
-        return result.ok ? undefined : result.error;
+        if (!result.ok) return result.error;
+        this.settleRatings(room);
+        return;
       }
 
       case 'declare': {
         if (!game) return 'There is no game in progress.';
         if (!this.seated(room, me)) return 'You are watching this game.';
         const result = declare(game, me.id, msg.set, msg.assignment);
-        return result.ok ? undefined : result.error;
+        if (!result.ok) return result.error;
+        this.settleRatings(room);
+        return;
       }
 
       case 'claimSeat': {
@@ -317,10 +336,11 @@ export class Rooms {
         const seat = room.members.get(msg.id);
         if (!game || this.seated(room, me)) return 'You already have a seat.';
         if (!seat || !this.seated(room, seat) || seat.isBot || seat.connected) return "That seat isn't free.";
-        const { conn, token, name } = me;
+        const { conn, token, name, pid } = me;
         const wasHost = isHost;
         this.remove(room, me);
         seat.token = token;
+        seat.pid = pid;
         seat.name = uniqueName({ members: new Map([...room.members].filter(([id]) => id !== seat.id)) }, name);
         if (wasHost) room.hostId = seat.id;
         this.attach(conn, room, seat);
@@ -343,6 +363,7 @@ export class Rooms {
         clearTimeout(room.botTimer);
         room.botTimer = room.botKey = null;
         room.game = null;
+        room.rating = null; // a game ended early changes nobody's rating
         for (const m of [...room.members.values()]) {
           m.botControlled = false;
           if (!m.isBot && !m.connected) this.remove(room, m);
@@ -385,6 +406,8 @@ export class Rooms {
       phase: game ? game.phase : 'lobby',
       hostId: room.hostId,
       you: member.id,
+      // Whether this game counts for ratings (or would, if started now), and why not.
+      unrated: room.rating ? room.rating.unrated : this.unratedReason(room),
       settings: room.settings,
       members: [...room.members.values()].map((m) => ({
         id: m.id,
@@ -394,6 +417,7 @@ export class Rooms {
         online: m.connected,
         auto: m.botControlled,
         cards: game?.hands.get(m.id)?.size ?? null,
+        rating: m.pid ? this.ratings.rating(m.pid) : null,
       })),
       game: game && {
         deck: game.deck,
@@ -405,8 +429,39 @@ export class Rooms {
         winner: game.winner,
         hand: sortCards([...(game.hands.get(member.id) ?? [])]),
         log,
+        ratingChanges: room.rating?.changes?.map(({ id, ...change }) => ({ ...change, you: id === member.pid })) ?? null,
       },
     };
+  }
+
+  // ---- ratings ----
+
+  /**
+   * Why a game between the current teams would not be rated, or null if it would.
+   * A game counts when each team has at least one identified human (so beating
+   * bots alone earns nothing) and nobody is sitting in two seats.
+   */
+  unratedReason(room) {
+    const players = [...room.members.values()].filter((m) => m.team);
+    const ids = players.map((m) => m.pid).filter(Boolean);
+    if (new Set(ids).size !== ids.length) return 'same-player';
+    if (!['A', 'B'].every((team) => players.some((m) => m.team === team && m.pid))) return 'needs-humans';
+    return null;
+  }
+
+  /** Once a rated game has finished, moves the ratings. Safe to call after every move. */
+  settleRatings(room) {
+    const { game, rating } = room;
+    if (game?.phase !== 'finished' || !rating || rating.unrated || rating.changes) return;
+    if (game.winner !== 'A' && game.winner !== 'B') {
+      rating.changes = [];
+      return;
+    }
+    const side = (team) => rating.players.filter((p) => p.team === team).map((p) => ({ id: p.pid, name: p.name }));
+    const teamOf = new Map(rating.players.map((p) => [p.pid, p.team]));
+    rating.changes = this.ratings
+      .recordGame({ winners: side(game.winner), losers: side(otherTeam(game.winner)) })
+      .map((change) => ({ ...change, team: teamOf.get(change.id) }));
   }
 
   // ---- bots ----
@@ -446,6 +501,7 @@ export class Rooms {
       const set = game.sets.find((s) => !s.claimedBy);
       declare(game, id, set.id, Object.fromEntries(set.cards.map((card) => [card, id])));
     }
+    this.settleRatings(room);
     this.broadcast(room);
   }
 }

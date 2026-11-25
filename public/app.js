@@ -4,7 +4,7 @@
 
 import { buildSets, cardInfo, setIdOf } from '/shared/cards.js';
 
-const TEAM_NAMES = { A: 'Orange', B: 'Blue' };
+const TEAM_NAMES = { A: 'Orange', B: 'Purple' };
 const other = (team) => (team === 'A' ? 'B' : 'A');
 const cls = (...names) => names.filter(Boolean).join(' ');
 
@@ -66,6 +66,51 @@ function loadSession(code) {
   }
 }
 
+/**
+ * A random secret this browser keeps for good; the server rates the player it
+ * stands for. Clearing site data, or using another browser, starts a new rating.
+ */
+function playerKey() {
+  let key = load(localStorage, 'fish:player');
+  if (!key) {
+    key = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    save(localStorage, 'fish:player', key);
+    if (load(localStorage, 'fish:player') !== key) return undefined; // storage is off: play as an unrated guest
+  }
+  return key;
+}
+
+const PLAYER = playerKey();
+
+// ---------------------------------------------------------------- theme
+// index.html sets <html data-theme> before the first paint: the saved choice, or else the system's.
+
+const currentTheme = () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  // Keep the phone's browser chrome the same colour as the page.
+  document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+}
+
+function themeButton() {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  return h(
+    'button',
+    {
+      class: 'icon-btn',
+      title: `Switch to the ${next} theme`,
+      'aria-label': `Switch to the ${next} theme`,
+      onclick: () => {
+        save(localStorage, 'fish:theme', next);
+        applyTheme(next);
+        render();
+      },
+    },
+    icon(next === 'dark' ? 'moon' : 'sun'),
+  );
+}
+
 // ---------------------------------------------------------------- state
 
 const state = {
@@ -83,6 +128,7 @@ const state = {
   declSet: null,
   declAssign: {},
   fresh: new Set(), // cards that arrived in the latest update, so they can be animated in
+  ratings: null, // { me, top }: this player's Elo standing and the leaderboard
   toast: null,
   flashed: 0,
 };
@@ -100,9 +146,10 @@ function connect() {
   ws.onopen = () => {
     retries = 0;
     state.status = 'open';
+    send({ t: 'hello', player: PLAYER }); // says who we are and fetches the leaderboard
     const session = state.code && loadSession(state.code);
     state.joining = Boolean(session) && !state.view;
-    if (session) send({ t: 'join', code: state.code, name: session.name, token: session.token });
+    if (session) send({ t: 'join', code: state.code, name: session.name, token: session.token, player: PLAYER });
     render();
   };
   ws.onmessage = (event) => receive(JSON.parse(event.data));
@@ -141,6 +188,9 @@ function receive(msg) {
       reconcile();
       break;
     }
+    case 'ratings':
+      state.ratings = { me: msg.me, top: msg.top };
+      break;
     case 'error':
       state.busy = false;
       state.joining = false;
@@ -165,6 +215,8 @@ function exitRoom() {
   Object.assign(state, { view: null, code: null, busy: false });
   resetMoves();
   if (location.pathname !== '/') history.replaceState(null, '', '/');
+  // Back on the home screen: the leaderboard may have moved while we played.
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'hello', player: PLAYER }));
 }
 
 function toast(text, kind = 'info') {
@@ -193,7 +245,7 @@ function rememberName() {
 function createRoom(event) {
   event.preventDefault();
   const name = rememberName();
-  if (name) send({ t: 'create', name });
+  if (name) send({ t: 'create', name, player: PLAYER });
 }
 
 function joinRoom(event) {
@@ -205,7 +257,7 @@ function joinRoom(event) {
     return;
   }
   const name = rememberName();
-  if (name) send({ t: 'join', code, name });
+  if (name) send({ t: 'join', code, name, player: PLAYER });
 }
 
 function leaveRoom() {
@@ -339,7 +391,7 @@ function render() {
   if (seq !== state.flashed) {
     state.flashed = seq;
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (seq && !reduced) root.querySelector('.banner')?.animate([{ transform: 'scale(1.015)', filter: 'brightness(1.4)' }, {}], 450);
+    if (seq && !reduced) root.querySelector('.banner')?.animate([{ transform: 'scale(1.015)', boxShadow: '0 0 0 4px rgb(128 128 128 / 0.55)' }, {}], 450);
   }
 }
 
@@ -360,9 +412,13 @@ function toastEl() {
 
 // ---- small pieces used everywhere
 
-/** A suit mark, drawn in CSS so it looks the same on every device. No suit means a joker's star. */
-function pip(suit) {
-  return h('span', { class: `pip pip-${suit ?? 'star'}`, 'aria-hidden': 'true' });
+/**
+ * A suit mark, drawn in CSS so it looks the same on every device. No suit means
+ * a joker's star. On a card it takes the card's colour; `tinted` gives a mark
+ * standing on its own the colour of its suit.
+ */
+function pip(suit, { tinted = false } = {}) {
+  return h('span', { class: cls('pip', `pip-${suit ?? 'star'}`, tinted && suit && `suit-${suit}`), 'aria-hidden': 'true' });
 }
 
 function icon(name) {
@@ -377,7 +433,7 @@ function cardEl(card, { small = false, fresh = false } = {}) {
   const info = cardInfo(card);
   return h(
     'span',
-    { class: cls('card', info.red && 'red', info.joker && 'joker', small && 'small', fresh && 'fresh'), role: 'img', 'aria-label': info.name, title: info.name },
+    { class: cls('card', `suit-${info.tint}`, info.joker && 'joker', small && 'small', fresh && 'fresh'), role: 'img', 'aria-label': info.name, title: info.name },
     cardFace(info),
   );
 }
@@ -385,12 +441,12 @@ function cardEl(card, { small = false, fresh = false } = {}) {
 /** A card mentioned in running text. */
 function cardChip(card) {
   const info = cardInfo(card);
-  return h('span', { class: cls('chip', info.red && 'red'), role: 'img', 'aria-label': info.name, title: info.name }, info.rank, pip(info.suit));
+  return h('span', { class: `chip suit-${info.tint}`, role: 'img', 'aria-label': info.name, title: info.name }, info.rank, pip(info.suit));
 }
 
 /** Short name for a set: its suit mark and "low" or "high". */
 function setLabel(set) {
-  return set.suit ? [pip(set.suit), set.kind] : '8s & jokers';
+  return set.suit ? [pip(set.suit, { tinted: true }), set.kind] : '8s & jokers';
 }
 
 function tag(text, kind = '') {
@@ -410,6 +466,7 @@ function rules() {
       h('li', {}, 'If they have it, they hand it over and you go again. If not, the turn passes to them.'),
       h('li', {}, 'When you think your team holds a whole set, ', h('strong', {}, 'declare'), ' it by saying which teammate has each card. All right and your team wins the set; any mistake and the other team gets it.'),
       h('li', {}, 'No table talk about cards. The team with the most sets wins.'),
+      h('li', {}, 'Games with a human player on each team are ', h('strong', {}, 'rated'), ': the winners take Elo points from the losers, more for an upset.'),
     ),
   );
 }
@@ -474,12 +531,42 @@ function homeScreen() {
   return h(
     'main',
     { class: 'home' },
-    // A fanned set of cards: the thing you are trying to collect.
-    h('div', { class: 'fan', 'aria-hidden': 'true' }, ['2H', '3H', '4H', '5H', '6H', '7H'].map((card, i) => h('span', { class: 'fan-slot', style: `--i: ${i}` }, cardEl(card)))),
+    h('div', { class: 'corner' }, themeButton()),
+    h('div', { class: 'fan', 'aria-hidden': 'true' }, ['9S', '10H', 'JD', 'QC', 'KH', 'AS'].map((card, i) => h('span', { class: 'fan-slot', style: `--i: ${i}` }, cardEl(card)))),
     h('h1', { class: 'logo' }, 'Fish'),
     h('p', { class: 'tagline' }, 'The team card game of asking, remembering and declaring, also known as Literature. For 4, 6 or 8 players.'),
     body,
+    leaderboard(),
     rules(),
+  );
+}
+
+function leaderboard() {
+  const { me, top } = state.ratings ?? { me: null, top: [] };
+  return h(
+    'section',
+    { class: 'panel board' },
+    h('h2', {}, 'Leaderboard'),
+    me?.games
+      ? h('p', { class: 'board-me' }, 'Your rating is ', h('strong', {}, me.rating), `: rank ${me.rank}, ${me.wins} won and ${me.losses} lost.`)
+      : null,
+    top.length === 0 ? h('p', { class: 'muted small' }, 'No rated games yet. Everyone starts at 1000, and ratings move after each game with a human player on both teams.') : null,
+    PLAYER ? null : h('p', { class: 'muted small' }, 'This browser is blocking storage, so your games here can’t be rated.'),
+    h(
+      'ol',
+      { class: 'board-list' },
+      top.slice(0, 10).map((row) =>
+        h(
+          'li',
+          { class: cls(row.you && 'you') },
+          h('span', { class: 'board-rank' }, row.rank),
+          h('span', { class: 'nm' }, row.name),
+          row.you ? tag('you') : null,
+          h('span', { class: 'board-record', title: `${row.wins} won, ${row.losses} lost` }, `${row.wins}–${row.losses}`),
+          h('span', { class: 'board-rating' }, row.rating),
+        ),
+      ),
+    ),
   );
 }
 
@@ -498,6 +585,7 @@ function topbar() {
       ? h('button', { class: 'btn quiet', onclick: () => confirm('End this game for everyone and go back to the lobby?') && send({ t: 'toLobby' }) }, 'End game')
       : null,
     h('button', { class: 'btn quiet', onclick: leaveRoom }, 'Leave'),
+    themeButton(),
   );
 }
 
@@ -542,6 +630,7 @@ function lobbyScreen() {
             {},
             h('span', { class: 'nm' }, m.name),
             memberTags(m),
+            m.rating == null ? null : h('span', { class: 'rating', title: 'Elo rating' }, m.rating),
             isHost && m.id !== v.you
               ? h('button', { class: 'icon-btn', title: `Remove ${m.name}`, 'aria-label': `Remove ${m.name}`, onclick: () => send({ t: 'kick', id: m.id }) }, icon('cross'))
               : null,
@@ -625,10 +714,18 @@ function lobbyScreen() {
             ]
           : h('p', { class: 'muted' }, ready ? 'Waiting for the host to start the game…' : null),
         problem ? h('p', { class: 'muted small start-note' }, problem) : null,
+        h('p', { class: 'muted small start-note' }, ratedNote(v.unrated)),
       ),
       rules(),
     ),
   );
+}
+
+/** One line on whether the game counts for Elo, and if not, why. */
+function ratedNote(unrated) {
+  if (unrated === 'needs-humans') return 'Practice game: ratings only change when each team has at least one human player.';
+  if (unrated === 'same-player') return 'Practice game: the same player is in more than one seat, so ratings won’t change.';
+  return 'Rated game: the result will change the players’ Elo ratings.';
 }
 
 // ---- game
@@ -709,7 +806,7 @@ function scoreboard(c) {
     h(
       'div',
       { class: 'set-strip' },
-      bySuit.map((group) => h('span', { class: 'set-group' }, group[0].suit ? pip(group[0].suit) : null, group.map((s) => segment(s, s.suit ? s.kind : '8s & jokers')))),
+      bySuit.map((group) => h('span', { class: 'set-group' }, group[0].suit ? pip(group[0].suit, { tinted: true }) : null, group.map((s) => segment(s, s.suit ? s.kind : '8s & jokers')))),
     ),
     side('B'),
   );
@@ -822,6 +919,22 @@ function resultPanel(c) {
     { class: cls('panel result', winner !== 'tie' && `team-${winner}`) },
     h('h2', {}, line),
     mine ? h('p', {}, mine) : null,
+    c.g.ratingChanges?.length
+      ? h(
+          'ul',
+          { class: 'changes', 'aria-label': 'Rating changes' },
+          c.g.ratingChanges.map((change) =>
+            h(
+              'li',
+              { class: cls(`team-${change.team}`, change.you && 'you') },
+              h('span', { class: 'who nm' }, change.name),
+              h('span', { class: cls('delta', change.delta > 0 ? 'up' : 'down') }, change.delta > 0 ? `+${change.delta}` : `−${-change.delta}`),
+              h('span', { class: 'after', title: 'New Elo rating' }, change.after),
+            ),
+          ),
+        )
+      : null,
+    c.v.unrated ? h('p', { class: 'muted small' }, 'Practice game: ratings are unchanged.') : null,
     c.isHost
       ? h(
           'div',
@@ -1020,7 +1133,7 @@ function handPanel(c) {
         h(
           'div',
           { class: 'hand-set' },
-          h('h3', {}, set.suit ? pip(set.suit) : null, set.name, h('span', { class: 'count' }, `${set.held}/${set.cards.length}`)),
+          h('h3', {}, set.suit ? pip(set.suit, { tinted: true }) : null, set.name, h('span', { class: 'count' }, `${set.held}/${set.cards.length}`)),
           h(
             'div',
             { class: 'hand-cards' },
@@ -1032,7 +1145,7 @@ function handPanel(c) {
               return h(
                 'button',
                 {
-                  class: cls('card', 'ghost', info.red && 'red', info.joker && 'joker', picking && 'pickable', selected && 'selected'),
+                  class: cls('card', 'ghost', `suit-${info.tint}`, info.joker && 'joker', picking && 'pickable', selected && 'selected'),
                   disabled: !picking,
                   'aria-pressed': String(selected),
                   'aria-label': `Ask for the ${info.name}`,
@@ -1093,5 +1206,12 @@ function logPanel(c) {
 // ---------------------------------------------------------------- start
 
 window.addEventListener('popstate', () => location.reload());
+// Follow the system's light/dark setting until the player picks a theme themselves.
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
+  if (load(localStorage, 'fish:theme')) return;
+  applyTheme(event.matches ? 'dark' : 'light');
+  render();
+});
+applyTheme(currentTheme());
 render();
 connect();

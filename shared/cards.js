@@ -9,12 +9,7 @@
 //     every suit, so low is 0-7 and high is 9-A, and with four jokers, one per
 //     suit ("XS", "XH", "XD", "XC").
 
-export const SUITS = {
-  S: { name: 'Spades', red: false },
-  H: { name: 'Hearts', red: true },
-  D: { name: 'Diamonds', red: true },
-  C: { name: 'Clubs', red: false },
-};
+const SUIT_NAMES = { S: 'Spades', H: 'Hearts', D: 'Diamonds', C: 'Clubs' };
 
 const SUIT_ORDER = ['S', 'H', 'D', 'C'];
 const RANK_NAMES = { J: 'Jack', Q: 'Queen', K: 'King', A: 'Ace' };
@@ -34,7 +29,7 @@ export function buildSets(deck = 54) {
   const { low, high, jokers } = DECKS[deck];
   const sets = [];
   for (const suit of SUIT_ORDER) {
-    const { name } = SUITS[suit];
+    const name = SUIT_NAMES[suit];
     sets.push({ id: `L${suit}`, name: `Low ${name}`, suit, kind: 'low', cards: low.map((rank) => rank + suit) });
     sets.push({ id: `H${suit}`, name: `High ${name}`, suit, kind: 'high', cards: high.map((rank) => rank + suit) });
   }
@@ -58,15 +53,19 @@ export function setIdOf(card) {
   return (Number(rank) <= 7 ? 'L' : 'H') + card.at(-1);
 }
 
-/** How to show a card. `suit` is null for the red and black jokers, which have no suit. */
+/**
+ * How to show a card. `suit` is null for the red and black jokers, which have
+ * none. `tint` is the suit whose colour the card is printed in: its own, or
+ * hearts and spades for the red and black jokers.
+ */
 export function cardInfo(card) {
-  if (card === 'RJ') return { rank: 'Joker', suit: null, red: true, joker: true, name: 'Red Joker' };
-  if (card === 'BJ') return { rank: 'Joker', suit: null, red: false, joker: true, name: 'Black Joker' };
+  if (card === 'RJ') return { rank: 'Joker', suit: null, tint: 'H', joker: true, name: 'Red Joker' };
+  if (card === 'BJ') return { rank: 'Joker', suit: null, tint: 'S', joker: true, name: 'Black Joker' };
   const suit = card.at(-1);
   const rank = card.slice(0, -1);
-  const { name, red } = SUITS[suit];
-  if (rank === 'X') return { rank: 'Joker', suit, red, joker: true, name: `Joker of ${name}` };
-  return { rank, suit, red, joker: false, name: `${RANK_NAMES[rank] ?? rank} of ${name}` };
+  const name = SUIT_NAMES[suit];
+  if (rank === 'X') return { rank: 'Joker', suit, tint: suit, joker: true, name: `Joker of ${name}` };
+  return { rank, suit, tint: suit, joker: false, name: `${RANK_NAMES[rank] ?? rank} of ${name}` };
 }
 
 // The 72-card deck holds every rank of the 54-card one, so its order serves both.
