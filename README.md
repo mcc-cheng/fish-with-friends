@@ -111,7 +111,7 @@ among friends and not something to build a public ladder on.
 
 ```
 shared/cards.js   card and set definitions, used by server and browser
-public/fonts/     Nunito, the typeface, bundled under the SIL Open Font Licence (licence alongside)
+public/fonts/     Roboto, the typeface, bundled under the SIL Open Font Licence (licence alongside)
 server/game.js    the rules: deal, ask, declare, turn passing, scoring (no networking)
 server/bot.js     computer player; works only from its hand and the public log
 server/ratings.js Elo arithmetic and the JSON file ratings are kept in
