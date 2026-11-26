@@ -14,12 +14,15 @@ export function shuffle(items, rng = Math.random) {
   return items;
 }
 
+/** When a player may declare: while their team has the turn, only on their own turn, or whenever they like. */
+export const DECLARE_RULES = ['team', 'turn', 'anytime'];
+
 /**
- * @param {{ seats: { id: string, team: 'A' | 'B' }[], deck?: 54 | 72, declareAnytime?: boolean, rng?: () => number }} options
+ * @param {{ seats: { id: string, team: 'A' | 'B' }[], deck?: 54 | 72, declareRule?: 'team' | 'turn' | 'anytime', rng?: () => number }} options
  *   `seats` is the order around the table and must alternate teams, so that an
  *   uneven deal (54 cards between 4 or 8 players) gives both teams the same total.
  */
-export function createGame({ seats, deck = 54, declareAnytime = false, rng = Math.random }) {
+export function createGame({ seats, deck = 54, declareRule = 'team', rng = Math.random }) {
   const sets = buildSets(deck).map((set) => ({ ...set, claimedBy: null }));
   const hands = new Map(seats.map((seat) => [seat.id, new Set()]));
   const cards = shuffle(sets.flatMap((set) => set.cards), rng);
@@ -27,7 +30,7 @@ export function createGame({ seats, deck = 54, declareAnytime = false, rng = Mat
   cards.forEach((card, i) => hands.get(seats[(dealer + i) % seats.length].id).add(card));
   return {
     deck,
-    declareAnytime,
+    declareRule,
     seats: seats.map(({ id, team }) => ({ id, team })),
     sets,
     hands,
@@ -74,23 +77,36 @@ export function ask(game, askerId, targetId, card) {
   return { ok: true, event };
 }
 
+/** Whether `playerId` is allowed to declare right now, under the game's declaring rule. */
+export function canDeclare(game, playerId) {
+  const player = seatOf(game, playerId);
+  if (!player || game.phase !== 'playing') return false;
+  if (game.declareRule === 'anytime') return true;
+  if (game.declareRule === 'turn') return game.turn === playerId;
+  return seatOf(game, game.turn).team === player.team;
+}
+
 /**
- * Claim a set by naming which teammate holds each card: `assignment` maps every
- * card of the set to a player id on the declarer's team. All six right and the
- * declarer's team takes the set; anything else and the other team does.
+ * Call a set by naming who holds each card: `assignment` maps every card of the
+ * set to a player id. The players named must all be on one team, the declarer's
+ * own or the other one. Every card right and the declarer's team takes the set;
+ * anything else and the other team does.
  */
 export function declare(game, declarerId, setId, assignment) {
   if (game.phase !== 'playing') return fail('The game is over.');
   const declarer = seatOf(game, declarerId);
   if (!declarer) return fail('Only players can declare.');
-  if (!game.declareAnytime && game.turn !== declarerId) return fail('You can only declare on your turn.');
+  if (!canDeclare(game, declarerId)) {
+    return fail(game.declareRule === 'turn' ? 'You can only declare on your turn.' : 'You can only declare while your team has the turn.');
+  }
   const set = game.sets.find((s) => s.id === setId);
   if (!set) return fail('Unknown set.');
   if (set.claimedBy) return fail('That set has already been claimed.');
   if (!assignment || typeof assignment !== 'object') return fail('Say who holds each card.');
-  for (const card of set.cards) {
-    const holder = seatOf(game, assignment[card]);
-    if (!holder || holder.team !== declarer.team) return fail('Assign every card to someone on your team.');
+  const named = set.cards.map((card) => seatOf(game, assignment[card]));
+  if (named.some((holder) => !holder)) return fail('Say who holds each card.');
+  if (named.some((holder) => holder.team !== named[0].team)) {
+    return fail('Name players from one team only: all on your team, or all on the other team.');
   }
 
   const actual = {};
@@ -112,6 +128,7 @@ export function declare(game, declarerId, setId, assignment) {
     set: setId,
     correct,
     team,
+    named: named[0].team, // the team whose players the declarer named
     assignment: Object.fromEntries(set.cards.map((card) => [card, assignment[card]])),
     actual,
     nextTurn: game.turn,

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildSets, cardInfo, setIdOf, sortCards } from '../shared/cards.js';
 import { chooseMove } from '../server/bot.js';
-import { ask, askableCards, createGame, declare } from '../server/game.js';
+import { ask, askableCards, canDeclare, createGame, declare } from '../server/game.js';
 
 /** A small seeded generator so failures are reproducible. */
 function seeded(seed) {
@@ -19,8 +19,8 @@ function seeded(seed) {
 const seats = (n) => Array.from({ length: n }, (_, i) => ({ id: `p${i}`, team: i % 2 === 0 ? 'A' : 'B' }));
 
 /** A game with hands chosen by the test: `hands` maps player id -> card ids. */
-function rigged(hands, { deck = 54, turn = 'p0', declareAnytime = false, players = 4 } = {}) {
-  const game = createGame({ seats: seats(players), deck, declareAnytime, rng: seeded(1) });
+function rigged(hands, { deck = 54, turn = 'p0', declareRule = 'team', players = 4 } = {}) {
+  const game = createGame({ seats: seats(players), deck, declareRule, rng: seeded(1) });
   for (const hand of game.hands.values()) hand.clear();
   const dealt = new Set();
   for (const [id, cards] of Object.entries(hands)) {
@@ -157,26 +157,78 @@ test('declaring a set the opponents hold part of gives it to them', () => {
   assert.deepEqual([...game.hands.get('p1')], ['10H']);
 });
 
-test('declarations must be complete, in-team, and for an open set', () => {
+test('a set held by the other team can be declared by naming their players', () => {
+  const hands = { p0: ['9H'], p2: ['10H'], p1: ['2S', '3S', 'JH'], p3: ['4S', '5S', '6S', '7S'] };
+  const theirs = { '2S': 'p1', '3S': 'p1', '4S': 'p3', '5S': 'p3', '6S': 'p3', '7S': 'p3' };
+
+  const right = rigged(hands);
+  const won = declare(right, 'p0', 'LS', theirs);
+  assert.equal(won.ok, true);
+  assert.deepEqual([won.event.correct, won.event.team, won.event.named], [true, 'A', 'B']);
+  assert.deepEqual(right.score, { A: 1, B: 0 });
+  assert.deepEqual([...right.hands.get('p1')], ['JH'], 'the cards leave the other team’s hands');
+  assert.equal(right.hands.get('p3').size, 0);
+  assert.equal(right.turn, 'p0');
+
+  // The right team but the wrong player for one card: the set goes to the team that held it.
+  const mixedUp = rigged(hands);
+  const lost = declare(mixedUp, 'p0', 'LS', { ...theirs, '4S': 'p1' });
+  assert.deepEqual([lost.event.correct, lost.event.team, lost.event.named], [false, 'B', 'B']);
+  assert.equal(lost.event.actual['4S'], 'p3');
+  assert.deepEqual(mixedUp.score, { A: 0, B: 1 });
+
+  // A set split between the teams can't be declared correctly from either side.
+  const split = { p0: ['2S', '9H'], p2: ['10H'], p1: ['3S', 'JH'], p3: ['4S', '5S', '6S', '7S'] };
+  for (const assignment of [theirs, Object.fromEntries(LOW_SPADES.map((c) => [c, 'p0']))]) {
+    const game = rigged(split);
+    assert.equal(declare(game, 'p0', 'LS', assignment).event.correct, false);
+    assert.deepEqual(game.score, { A: 0, B: 1 });
+  }
+});
+
+test('declarations must be complete, name one team only, and be for an open set', () => {
   const game = rigged({ p0: ['2S', '3S', '9H'], p2: ['4S', '5S', '6S', '7S'], p1: ['10H'], p3: ['JH'] });
   const good = { '2S': 'p0', '3S': 'p0', '4S': 'p2', '5S': 'p2', '6S': 'p2', '7S': 'p2' };
   assert.equal(declare(game, 'p0', 'LS', { ...good, '7S': undefined }).ok, false);
-  assert.equal(declare(game, 'p0', 'LS', { ...good, '7S': 'p1' }).ok, false);
+  assert.equal(declare(game, 'p0', 'LS', { ...good, '7S': 'watcher' }).ok, false);
+  assert.match(declare(game, 'p0', 'LS', { ...good, '7S': 'p1' }).error, /one team/); // players from both teams
   assert.equal(declare(game, 'p0', 'LS', null).ok, false);
   assert.equal(declare(game, 'p0', 'nope', good).ok, false);
   assert.equal(declare(game, 'p0', 'HD', good).ok, false); // already claimed
-  assert.equal(declare(game, 'p2', 'LS', good).ok, false); // not p2's turn
   assert.equal(declare(game, 'watcher', 'LS', good).ok, false);
   assert.equal(game.log.length, 0);
+  assert.equal(game.score.A + game.score.B, 0);
 });
 
-test('the "declare any time" rule lets a teammate declare out of turn', () => {
+test('who may declare follows the declaring rule', () => {
   const hands = { p0: ['2S', '3S', '9H'], p2: ['4S', '5S', '6S', '7S'], p1: ['10H'], p3: ['JH'] };
   const assignment = { '2S': 'p0', '3S': 'p0', '4S': 'p2', '5S': 'p2', '6S': 'p2', '7S': 'p2' };
-  const game = rigged(hands, { declareAnytime: true, turn: 'p1' });
-  assert.equal(declare(game, 'p2', 'LS', assignment).ok, true);
-  assert.equal(game.score.A, 1);
-  assert.equal(game.turn, 'p1', 'the turn stays where it was');
+  const allowed = (declareRule, turn) => {
+    const game = rigged(hands, { declareRule, turn });
+    return ['p0', 'p1', 'p2', 'p3'].filter((id) => canDeclare(game, id));
+  };
+
+  // The default: anyone on the team that has the turn.
+  assert.deepEqual(allowed('team', 'p0'), ['p0', 'p2']);
+  assert.deepEqual(allowed('team', 'p1'), ['p1', 'p3']);
+  assert.deepEqual(allowed('turn', 'p0'), ['p0']);
+  assert.deepEqual(allowed('anytime', 'p1'), ['p0', 'p1', 'p2', 'p3']);
+
+  // A teammate declares while p0 has the turn, and p0 keeps it.
+  const mine = rigged(hands, { turn: 'p0' });
+  assert.equal(declare(mine, 'p2', 'LS', assignment).ok, true);
+  assert.deepEqual([mine.score.A, mine.turn], [1, 'p0']);
+
+  // Not while the other team has the turn, and nothing changes.
+  const theirs = rigged(hands, { turn: 'p1' });
+  assert.match(declare(theirs, 'p2', 'LS', assignment).error, /your team has the turn/);
+  assert.equal(theirs.log.length, 0);
+  assert.match(declare(rigged(hands, { declareRule: 'turn' }), 'p2', 'LS', assignment).error, /on your turn/);
+
+  // "Any time" lets them, and the turn stays where it was.
+  const anytime = rigged(hands, { declareRule: 'anytime', turn: 'p1' });
+  assert.equal(declare(anytime, 'p2', 'LS', assignment).ok, true);
+  assert.deepEqual([anytime.score.A, anytime.turn], [1, 'p1']);
 });
 
 test('a player left with no cards passes the turn to a teammate, then to the opponents', () => {
@@ -228,7 +280,8 @@ test('random legal play always reaches the end with the cards accounted for', ()
   for (let seed = 1; seed <= 60; seed++) {
     const rng = seeded(seed);
     const players = [4, 6, 8][seed % 3];
-    const game = createGame({ seats: seats(players), deck: seed % 2 ? 54 : 72, declareAnytime: seed % 4 === 0, rng });
+    const declareRule = ['team', 'turn', 'anytime'][Math.floor(seed / 3) % 3];
+    const game = createGame({ seats: seats(players), deck: seed % 2 ? 54 : 72, declareRule, rng });
     const pick = (items) => items[Math.floor(rng() * items.length)];
     for (let moves = 0; game.phase === 'playing'; moves++) {
       assert.ok(moves < 20_000, `seed ${seed} did not finish`);
@@ -238,10 +291,11 @@ test('random legal play always reaches the end with the cards accounted for', ()
       if (foes.length > 0 && cards.length > 0 && rng() < 0.97) {
         assert.equal(ask(game, me.id, pick(foes).id, pick(cards)).ok, true);
       } else {
+        // Anyone the rule allows declares some open set, naming players from one team or the other.
         const set = pick(game.sets.filter((s) => !s.claimedBy));
-        const mates = game.seats.filter((seat) => seat.team === me.team);
-        const declarer = game.declareAnytime ? pick(game.seats) : me;
-        const team = declarer === me ? mates : game.seats.filter((seat) => seat.team === declarer.team);
+        const declarer = pick(game.seats.filter((seat) => canDeclare(game, seat.id)));
+        const named = pick(['A', 'B']);
+        const team = game.seats.filter((seat) => seat.team === named);
         assert.equal(declare(game, declarer.id, set.id, Object.fromEntries(set.cards.map((c) => [c, pick(team).id]))).ok, true);
       }
       checkInvariants(game);
@@ -272,4 +326,21 @@ test('bots only make legal moves and always finish a game', () => {
   }
   // Bots mostly declare from certainty, so the bulk of their declarations should be right.
   assert.ok(correct / declarations > 0.8, `only ${correct}/${declarations} bot declarations were correct`);
+});
+
+test('a bot takes a set it can place entirely in the other team’s hands', () => {
+  const game = rigged({ p0: ['9H'], p2: ['10H'], p1: ['2S', '3S', '4S', '5S', 'JH'], p3: ['6S', '7S'] });
+  const asked = (asker, target, card, success) => game.log.push({ type: 'ask', seq: game.log.length + 1, asker, target, card, success });
+  // p0 has watched p1 collect four of the low spades...
+  for (const card of ['2S', '3S', '4S']) asked('p1', 'p0', card, true);
+  asked('p1', 'p2', '5S', true);
+  // ...and fail to find the other two with p2, so they can only be with p3.
+  asked('p1', 'p2', '6S', false);
+  assert.notEqual(chooseMove(game, 'p0', seeded(3)).set, 'LS', 'not while one card could still be anywhere');
+  asked('p1', 'p2', '7S', false);
+
+  const move = chooseMove(game, 'p0', seeded(3));
+  assert.deepEqual(move, { type: 'declare', set: 'LS', assignment: { '2S': 'p1', '3S': 'p1', '4S': 'p1', '5S': 'p1', '6S': 'p3', '7S': 'p3' } });
+  const result = declare(game, 'p0', move.set, move.assignment);
+  assert.deepEqual([result.event.correct, result.event.team, result.event.named], [true, 'A', 'B']);
 });

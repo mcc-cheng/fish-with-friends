@@ -59,8 +59,10 @@ placeholder name ("Guest 1234"), which can be changed on the profile page.
   with the jokers.
 - On your turn you **ask** one opponent for one exact card. You must hold a card from the same set and
   can't ask for a card you already have. If they have it you take it and go again; if not, it's their turn.
-- You **declare** a set by saying which teammate holds each of its cards. All of them right: your team
-  wins the set. Anything wrong: the other team gets it. Either way the cards leave play.
+- You **declare** a set by saying who holds each of its cards. The players you name must all be on one
+  team: your own, or the other one. All of them right: your team wins the set, even if the other team
+  held it. Anything wrong: the other team gets it. Either way the cards leave play.
+- You can declare whenever your team has the turn, even if it is a teammate's turn and not yours.
 - A player who runs out of cards hands the turn to the next teammate who has some. When a whole team is
   out of cards, the other team has to declare everything that's left.
 - Most sets wins. With nine sets there are no ties.
@@ -70,7 +72,7 @@ The host picks the house rules in the lobby:
 | Rule | Options |
 | --- | --- |
 | Deck | **Nine sets of six** (54 cards): low is 2–7, high is 9–A, and the 8s plus two jokers make the ninth set. **Nine sets of eight** (72 cards): the same deck stretched with a 0, 1, 11 and 12 in every suit and four jokers, so low is 0–7 and high is 9–A. It gives 8 players nine cards each. |
-| Declaring | **On your turn** only, or **any time** by anyone. |
+| Declaring | **On your team's turn** (anyone on the team that has the turn), **on your own turn** only, or **any time** by anyone. |
 | Bot moves | **One at a time**: a bot waits until a player presses Next (or Space), so everyone can follow each move. **Automatic**: bots play by themselves after a short pause. |
 | Question history | **Full log** for everyone, or the **last question only** as at a real table. |
 

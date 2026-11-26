@@ -139,7 +139,7 @@ test('lobby: joining, teams, bots, settings and host-only actions', async () => 
   await host.fails({ t: 'settings', settings: { deck: 48 } });
   await host.fails({ t: 'settings', settings: { constructor: 1 } });
   state = await host.act({ t: 'settings', settings: { deck: 72, history: 'last' } }, (s) => s.settings.deck === 72);
-  assert.deepEqual(state.settings, { deck: 72, declare: 'turn', history: 'last', botPace: 'step' });
+  assert.deepEqual(state.settings, { deck: 72, declare: 'team', history: 'last', botPace: 'step' });
 
   // Switching teams, and a full team refusing a fifth player.
   const teamA = (s) => s.members.filter((m) => m.team === 'A');
@@ -230,6 +230,41 @@ function allToMe(setId, me) {
   return Object.fromEntries(set.cards.map((card) => [card, me]));
 }
 
+test('declaring: any time your team has the turn, naming your team’s players or the other team’s', async () => {
+  const { host, code } = await createRoom('Ada');
+  const guests = [];
+  for (const name of ['Bo', 'Cy', 'Di']) guests.push((await joinRoom(code, name)).client);
+  const clients = [host, ...guests];
+  const started = clients.map((client) => client.state((s) => s.phase === 'playing'));
+  host.send({ t: 'start' });
+  const views = await Promise.all(started);
+
+  // Two a side and no bots, so the turn sits with one of the four until somebody asks.
+  const teamOf = new Map(views[0].members.map((m) => [m.id, m.team]));
+  const turnTeam = teamOf.get(views[0].game.turn);
+  for (const view of views) assert.equal(view.game.canDeclare, teamOf.get(view.you) === turnTeam, 'only the team with the turn may declare');
+
+  const at = (pick) => views.findIndex(pick);
+  const mate = at((v) => teamOf.get(v.you) === turnTeam && v.you !== v.game.turn); // on the team, but not their own turn
+  const foe = at((v) => teamOf.get(v.you) !== turnTeam);
+  const others = views.filter((v) => teamOf.get(v.you) !== turnTeam).map((v) => v.you);
+  const set = buildSets(54)[0];
+  const all = (id) => Object.fromEntries(set.cards.map((card) => [card, id]));
+
+  assert.match((await clients[foe].fails({ t: 'declare', set: set.id, assignment: all(views[foe].you) })).message, /your team has the turn/);
+  const mixed = { ...all(others[0]), [set.cards[0]]: views[mate].you };
+  assert.match((await clients[mate].fails({ t: 'declare', set: set.id, assignment: mixed })).message, /one team/);
+
+  // The teammate calls the set as held by the other team. Right or wrong, it is a legal call.
+  const reply = await clients[mate].act({ t: 'declare', set: set.id, assignment: all(others[0]) }, (s) => s.game.log.length === 1);
+  assert.equal(reply.t, 'state', reply.message);
+  const event = reply.game.log[0];
+  assert.deepEqual([event.type, event.declarer, event.named], ['declare', views[mate].you, teamOf.get(others[0])]);
+  assert.equal(event.team, event.correct ? turnTeam : teamOf.get(others[0]));
+  assert.equal(reply.game.score[event.team], 1);
+  assert.equal(reply.game.turn, views[0].game.turn, 'the turn stays with the player who had it');
+});
+
 test('reconnecting with a token restores the seat; a stranger can take over an abandoned one', async () => {
   const { host, code } = await createRoom('Ada');
   const { client: guest, reply } = await joinRoom(code, 'Grace');
@@ -283,6 +318,8 @@ test('the host role moves on when the host stays away', async () => {
  */
 async function humanToMove(client) {
   let state = await client.state(() => true, { fresh: false });
+  // Another player may have seen the game start first: wait for this client's copy of it.
+  if (!state.game) state = await client.state((s) => s.game);
   for (;;) {
     const mover = state.members.find((m) => m.id === state.game.turn);
     if (state.phase !== 'playing' || !mover.bot) return state;

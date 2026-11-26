@@ -21,7 +21,8 @@ const SETTINGS = [
     key: 'declare',
     label: 'Declaring',
     options: [
-      ['turn', 'On your turn', 'Only the player whose turn it is may declare.'],
+      ['team', 'On your team’s turn', 'Anyone on the team that has the turn may declare.'],
+      ['turn', 'On your own turn', 'Only the player whose turn it is may declare.'],
       ['anytime', 'Any time', 'Anyone may declare at any moment.'],
     ],
   },
@@ -154,6 +155,7 @@ const state = {
   askTarget: null,
   declOpen: false,
   declSet: null,
+  declSide: 'mine', // whose players the declaration names: 'mine' (your team) or 'theirs'
   declAssign: {},
   fresh: new Set(), // cards that arrived in the latest update, so they can be animated in
   ratings: null, // { me, top }: this player's Elo standing and the leaderboard
@@ -336,7 +338,7 @@ async function copyLink() {
 }
 
 function resetMoves() {
-  Object.assign(state, { tab: 'ask', askCard: null, askTarget: null, declOpen: false, declSet: null, declAssign: {} });
+  Object.assign(state, { tab: 'ask', askCard: null, askTarget: null, declOpen: false, declSet: null, declSide: 'mine', declAssign: {} });
 }
 
 function submitAsk() {
@@ -378,6 +380,7 @@ function reconcile() {
   if (state.askTarget && !cardsOf.get(state.askTarget)) state.askTarget = null;
   if (game.turn !== you) {
     state.tab = 'ask';
+    if (!game.canDeclare) state.declOpen = false;
   } else if (state.declOpen) {
     // The turn arrived while they were filling in a declaration: keep them on it.
     state.tab = 'declare';
@@ -387,8 +390,14 @@ function reconcile() {
   const set = buildSets(game.deck).find((s) => s.id === state.declSet);
   if (!set || game.sets.find((s) => s.id === set.id).claimedBy) {
     state.declSet = null;
+    state.declSide = 'mine';
     state.declAssign = {};
     return;
+  }
+  if (state.declSide === 'theirs' && set.cards.some((card) => hand.has(card))) {
+    // They have picked up part of the set, so it can no longer all be with the other team.
+    state.declSide = 'mine';
+    state.declAssign = {};
   }
   for (const card of set.cards) {
     const assigned = state.declAssign[card];
@@ -566,7 +575,7 @@ function topbar() {
     { class: cls('topbar', v && 'in-room') },
     v ? h('span', { class: 'brand' }, 'Fish') : h('a', { class: 'brand', href: '/' }, 'Fish with Friends'),
     v
-      ? h('button', { class: 'room-pill', title: 'Copy the invite link', onclick: copyLink }, 'Game ', h('strong', {}, v.code), h('span', { class: 'copy' }, 'Copy link'))
+      ? h('button', { class: 'room-pill', title: 'Copy the invite link', onclick: copyLink }, h('span', { class: 'label' }, 'Game'), h('strong', {}, v.code), h('span', { class: 'copy' }, 'Copy link'))
       : null,
     h('span', { class: 'spacer' }),
     isHost && v.phase === 'playing'
@@ -888,14 +897,14 @@ function helpScreen() {
       ),
       section(
         'Declaring a set',
-        p('When you think your team holds a whole set between you, ', b('declare'), ' it: say which teammate holds each of its cards.'),
+        p('When you know where every card of a set is, ', b('declare'), ' it: name the set and say who holds each of its cards. The players you name must all be on one team: either your team holds the whole set, or the other team does.'),
         h(
           'ul',
           {},
-          h('li', {}, 'Every card right: your team wins the set.'),
-          h('li', {}, 'Any card wrong, including one an opponent turns out to hold: the other team wins it.'),
+          h('li', {}, 'Every card right: your team wins the set, even if it was all in the other team’s hands.'),
+          h('li', {}, 'Any card wrong: the other team wins it. A set split between the two teams can’t be declared correctly, so ask for the missing cards first.'),
         ),
-        p('Either way the set leaves the game and the cards are shown. Teammates may not tell each other what they hold, so declaring is done from what you have seen asked and answered.'),
+        p('You can declare whenever your team has the turn, even when it is a teammate’s turn and not yours. The set then leaves the game and its cards are shown. Teammates may not tell each other what they hold, so declaring is done from what you have seen asked and answered.'),
       ),
       section(
         'Running out of cards',
@@ -909,7 +918,7 @@ function helpScreen() {
           'ul',
           {},
           h('li', {}, b('Deck'), ': sets of six or sets of eight, as above.'),
-          h('li', {}, b('Declaring'), ': only on your own turn, or at any time by anyone.'),
+          h('li', {}, b('Declaring'), ': whenever your team has the turn, only on your own turn, or at any time by anyone.'),
           h('li', {}, b('Bot moves'), ': one at a time, with a bot waiting until a player presses Next (or Space); or automatically after a short pause.'),
           h('li', {}, b('Question history'), ': a full log everyone can scroll back through, or only the last question, as at a real table.'),
         ),
@@ -1092,8 +1101,9 @@ function gameContext() {
   const foes = seats.filter((m) => m.team !== myTeam);
   const canAsk = myTurn && foes.some((m) => m.cards > 0) && sets.some((s) => !s.claimedBy && s.held > 0 && s.held < s.cards.length);
   const isHost = v.hostId === v.you;
+  const canDeclare = seated && Boolean(g.canDeclare);
   const canStep = v.phase === 'playing' && g.awaitingNext && (seated || isHost);
-  return { v, g, byId, me, seated, myTeam, hand, sets, setSize: sets[0].cards.length, seats, myTurn, foes, canAsk, canStep, isHost };
+  return { v, g, byId, me, seated, myTeam, hand, sets, setSize: sets[0].cards.length, seats, myTurn, foes, canAsk, canDeclare, canStep, isHost };
 }
 
 /** A player's name in their team colour; "you" for the viewer. */
@@ -1102,6 +1112,12 @@ function who(c, id, { capital = false } = {}) {
   if (!m) return 'someone';
   const text = id === c.v.you ? (capital ? 'You' : 'you') : m.name;
   return h('span', { class: `who team-${m.team}` }, text);
+}
+
+/** " from Purple’s hands": added to the story of a declaration that named the other team's players. */
+function fromOtherTeam(c, event) {
+  if (!event.named || event.named === c.byId.get(event.declarer)?.team) return null;
+  return [' from ', h('span', { class: `who team-${event.named}` }, TEAM_NAMES[event.named]), '’s hands'];
 }
 
 function gameScreen() {
@@ -1232,6 +1248,7 @@ function banner(c) {
         who(c, last.declarer, { capital: true }),
         last.correct ? ' declared ' : ' misdeclared ',
         h('strong', {}, set.name),
+        fromOtherTeam(c, last),
         last.correct ? '. A set for ' : '. The set goes to ',
         h('span', { class: `who team-${last.team}` }, TEAM_NAMES[last.team]),
         '. ',
@@ -1317,7 +1334,7 @@ function actionPanel(c) {
     const waiting = c.g.awaitingNext
       ? h('p', { class: 'waiting' }, who(c, c.g.turn, { capital: true }), ' is a bot, and moves when a player presses Next.')
       : h('p', { class: 'waiting' }, 'Waiting for ', who(c, c.g.turn), '…');
-    if (!c.g.declareAnytime) return h('section', { class: 'panel action' }, waiting);
+    if (!c.canDeclare) return h('section', { class: 'panel action' }, waiting);
     return h(
       'section',
       { class: 'panel action' },
@@ -1407,13 +1424,17 @@ function askForm(c) {
   );
 }
 
-function chooseDeclareSet(c, set) {
+/** Starts a declaration of `set`, naming players on your team ('mine') or on the other one ('theirs'). */
+function chooseDeclareSet(c, set, side = state.declSide) {
   state.declSet = set.id;
+  // Holding part of a set yourself rules out its being all with the other team.
+  state.declSide = set.held > 0 ? 'mine' : side;
   state.declAssign = {};
-  const mates = c.seats.filter((m) => m.team === c.myTeam && m.id !== c.v.you && m.cards > 0);
+  const team = state.declSide === 'mine' ? c.myTeam : other(c.myTeam);
+  const others = c.seats.filter((m) => m.team === team && m.id !== c.v.you && m.cards > 0);
   for (const card of set.cards) {
     if (c.hand.has(card)) state.declAssign[card] = c.v.you;
-    else if (mates.length === 1) state.declAssign[card] = mates[0].id; // nobody else it could be
+    else if (others.length === 1) state.declAssign[card] = others[0].id; // nobody else it could be
   }
   render();
 }
@@ -1421,12 +1442,25 @@ function chooseDeclareSet(c, set) {
 function declareForm(c) {
   const open = c.sets.filter((s) => !s.claimedBy);
   const set = open.find((s) => s.id === state.declSet);
-  const mates = c.seats.filter((m) => m.team === c.myTeam && m.id !== c.v.you);
+  const theirs = other(c.myTeam);
+  const named = c.seats.filter((m) => m.team === (state.declSide === 'mine' ? c.myTeam : theirs) && m.id !== c.v.you);
   const complete = set?.cards.every((card) => state.declAssign[card]);
+  const sideButton = (side, team, label, disabled) =>
+    h(
+      'button',
+      {
+        class: `pill team-${team}`,
+        'aria-pressed': String(state.declSide === side),
+        disabled,
+        title: disabled ? 'You hold part of this set, so it can’t all be with the other team.' : null,
+        onclick: () => chooseDeclareSet(c, set, side),
+      },
+      label,
+    );
   return h(
     'div',
     { class: 'declare' },
-    h('p', { class: 'hint' }, 'Say which teammate holds each card. One mistake and the other team takes the set.'),
+    h('p', { class: 'hint' }, 'Say who holds each card. They must all be on your team, or all on the other team. One mistake and the other team takes the set.'),
     h(
       'div',
       { class: 'pills' },
@@ -1442,6 +1476,15 @@ function declareForm(c) {
     set
       ? h(
           'div',
+          { class: 'ask-line' },
+          h('span', { class: 'step-label' }, 'Held by'),
+          sideButton('mine', c.myTeam, 'Your team', false),
+          sideButton('theirs', theirs, 'The other team', set.held > 0),
+        )
+      : null,
+    set
+      ? h(
+          'div',
           { class: 'assign' },
           set.cards.map((card) =>
             h(
@@ -1453,7 +1496,7 @@ function declareForm(c) {
                 : h(
                     'div',
                     { class: 'pills' },
-                    mates.map((m) =>
+                    named.map((m) =>
                       h(
                         'button',
                         {
@@ -1547,6 +1590,7 @@ function logPanel(c) {
         who(c, event.declarer, { capital: true }),
         event.correct ? ' declared ' : ' misdeclared ',
         h('strong', {}, set.name),
+        fromOtherTeam(c, event),
         ': a set for ',
         h('span', { class: `who team-${event.team}` }, TEAM_NAMES[event.team]),
       ),

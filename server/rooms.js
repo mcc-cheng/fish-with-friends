@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { sortCards } from '../shared/cards.js';
 import { chooseMove } from './bot.js';
-import { ask, createGame, declare, otherTeam, shuffle } from './game.js';
+import { ask, canDeclare, createGame, declare, DECLARE_RULES, otherTeam, shuffle } from './game.js';
 import { History } from './history.js';
 import { Ratings, playerId } from './ratings.js';
 
@@ -24,7 +24,7 @@ const BOT_NAMES = ['Guppy', 'Minnow', 'Tetra', 'Koi', 'Pike', 'Trout', 'Perch', 
 // The first value of each setting is its default.
 const SETTING_VALUES = {
   deck: [54, 72],
-  declare: ['turn', 'anytime'],
+  declare: DECLARE_RULES,
   history: ['full', 'last'],
   botPace: ['step', 'auto'], // bots wait for a player to press Next, or play by themselves after a pause
 };
@@ -407,7 +407,7 @@ export class Rooms {
         room.game = createGame({
           seats: first.flatMap((m, i) => [m, second[i]]),
           deck: room.settings.deck,
-          declareAnytime: room.settings.declare === 'anytime',
+          declareRule: room.settings.declare,
           rng,
         });
         return;
@@ -538,7 +538,7 @@ export class Rooms {
       })),
       game: game && {
         deck: game.deck,
-        declareAnytime: game.declareAnytime,
+        canDeclare: canDeclare(game, member.id),
         seats: game.seats.map((seat) => seat.id),
         turn: game.turn,
         score: game.score,

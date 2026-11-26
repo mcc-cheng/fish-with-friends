@@ -1906,13 +1906,24 @@ a.icon-btn {
 /* ---- screen sizes ---- */
 
 @media (max-width: 480px) {
-  .room-pill .copy {
+  .room-pill .copy,
+  .room-pill .label {
     display: none;
   }
 
-  /* Phones are short of room in the bar during a game: the profile link can wait. */
+  /* Phones are short of room in the bar during a game: the profile link can wait,
+     and the host's extra "End game" button has to fit beside "Leave". */
   .topbar.in-room .me {
     display: none;
+  }
+
+  .topbar.in-room {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .topbar.in-room .btn.quiet {
+    padding-inline: 8px;
   }
 
   /* ...and in the list of games, the two least urgent columns. */

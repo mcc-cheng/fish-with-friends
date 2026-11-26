@@ -83,11 +83,12 @@ export function chooseMove(game, botId, rng = Math.random) {
     assignment: Object.fromEntries(set.cards.map((card) => [card, whoHolds(card)])),
   });
 
-  // 1. A set we can place card for card: claim it.
+  // 1. A set we can place card for card, all of it with our team or all of it
+  //    with the other one: claim it.
   for (const set of openSets) {
-    if (set.cards.every((card) => holder.has(card) && onMyTeam(holder.get(card)))) {
-      return declareMove(set, (card) => holder.get(card));
-    }
+    if (!set.cards.every((card) => holder.has(card))) continue;
+    const ours = set.cards.filter((card) => onMyTeam(holder.get(card))).length;
+    if (ours === set.cards.length || ours === 0) return declareMove(set, (card) => holder.get(card));
   }
 
   // 2. Ask: take a card whose holder we know, otherwise make a guess that hasn't been ruled out.
