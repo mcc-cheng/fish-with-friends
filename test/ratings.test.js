@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { K_FACTOR, Ratings, START_RATING, expectedScore, playerId, winnerGain } from '../server/ratings.js';
+import { BOT_ID, BOT_NAME, K_FACTOR, Ratings, START_RATING, expectedScore, playerId, winnerGain } from '../server/ratings.js';
 
-const team = (...ids) => ids.map((id) => ({ id, name: id ? `Player ${id}` : 'Bot' }));
+const team = (...ids) => ids.map((id) => ({ id, name: id === BOT_ID ? 'Guppy' : id ? `Player ${id}` : 'Guest' }));
 
 test('expected score follows the Elo curve', () => {
   assert.equal(expectedScore(1000, 1000), 0.5);
@@ -44,23 +44,59 @@ test('a game between new players moves everyone by half of K', () => {
   assert.deepEqual(ratings.profile('stranger'), { rating: START_RATING, games: 0, wins: 0, losses: 0, rank: null });
 });
 
-test('teams are rated by their average, and bots count as the starting rating', () => {
+test('teams are rated by their average, and guests count as the starting rating', () => {
   const ratings = new Ratings();
   // Lift "strong" well above the rest.
   for (let i = 0; i < 12; i++) ratings.recordGame({ winners: team('strong'), losers: team(`sparring${i}`) });
   const strong = ratings.rating('strong');
   assert.ok(strong > 1150);
 
-  // strong + a bot, against two newcomers: the favourites win, so they gain less than 16.
+  // strong + a guest, against two newcomers: the favourites win, so they gain less than 16.
   const expected = winnerGain((strong + START_RATING) / 2, START_RATING);
   const changes = ratings.recordGame({ winners: team('strong', null), losers: team('x', 'y') });
   assert.ok(expected < 16);
   assert.deepEqual(changes.map((c) => [c.id, c.delta]), [['strong', expected], ['x', -expected], ['y', -expected]]);
-  assert.equal(ratings.players.has(null), false, 'bots get no record');
+  assert.equal(ratings.players.has(null), false, 'guests get no record');
 
   // The same teams the other way round is an upset, worth more.
   const upset = ratings.recordGame({ winners: team('x', 'y'), losers: team('strong', null) });
   assert.ok(upset[0].delta > 16);
+});
+
+test('the bots share one rating, which moves with the seats they won and lost', () => {
+  const ratings = new Ratings();
+  assert.equal(ratings.rating(BOT_ID), START_RATING);
+
+  // Bots alone against a player: the full amount, once, however many seats they filled.
+  let changes = ratings.recordGame({ winners: team(BOT_ID, BOT_ID), losers: team('ann', 'bea') });
+  assert.deepEqual(changes[0], { id: BOT_ID, name: BOT_NAME, before: 1000, after: 1016, delta: 16 });
+  assert.deepEqual(ratings.profile(BOT_ID), { rating: 1016, games: 1, wins: 1, losses: 0, rank: 1 });
+
+  // A bot counts as the bots' rating in its team's average: once the bots have
+  // climbed, a newcomer with a bot beside them is the favourite against two newcomers.
+  for (let i = 0; i < 6; i++) ratings.recordGame({ winners: team(BOT_ID), losers: team(`sparring${i}`) });
+  const gain = winnerGain((1000 + ratings.rating(BOT_ID)) / 2, 1000);
+  assert.ok(gain < 16);
+  changes = ratings.recordGame({ winners: team('cy', BOT_ID), losers: team('dee', 'eve') });
+  assert.deepEqual(changes.map((c) => [c.id, c.delta]), [['cy', gain], [BOT_ID, gain], ['dee', -gain], ['eve', -gain]]);
+
+  // On both teams, the bots move by the balance of their seats: here one won and two lost, a third of the loss.
+  const before = ratings.rating(BOT_ID);
+  const stake = winnerGain((1000 + before) / 2, before);
+  changes = ratings.recordGame({ winners: team('fay', BOT_ID), losers: team(BOT_ID, BOT_ID) });
+  assert.deepEqual(changes.map((c) => [c.id, c.delta]), [['fay', stake], [BOT_ID, -Math.round(stake / 3)]]);
+  assert.equal(ratings.profile(BOT_ID).losses, 1);
+
+  // The same number on each side tells nothing about the bots: no change, and no game counted.
+  const games = ratings.profile(BOT_ID).games;
+  changes = ratings.recordGame({ winners: team('gil', BOT_ID), losers: team('hal', BOT_ID) });
+  assert.deepEqual(changes.map((c) => [c.id, c.delta]), [['gil', 16], ['hal', -16]]);
+  assert.equal(ratings.profile(BOT_ID).games, games);
+
+  // Their row on the leaderboard is marked, and carries their own name, not a bot's.
+  const row = ratings.leaderboard().find((r) => r.bot);
+  assert.deepEqual([row.name, row.rating, row.you], [BOT_NAME, ratings.rating(BOT_ID), false]);
+  assert.equal(ratings.leaderboard().filter((r) => r.bot).length, 1);
 });
 
 test('the leaderboard is ordered by rating and marks the viewer', () => {

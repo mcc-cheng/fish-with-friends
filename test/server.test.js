@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { after, before, test } from 'node:test';
 import WebSocket from 'ws';
 import { createApp } from '../server/app.js';
+import { BOT_ID, BOT_NAME, winnerGain } from '../server/ratings.js';
 import { buildSets } from '../shared/cards.js';
 
 let app;
@@ -108,6 +109,8 @@ test('serves the client and room links', async () => {
   assert.equal((await get('/bcdf')).status, 200);
   assert.equal((await get('/help')).status, 200);
   assert.equal((await get('/profile')).status, 200);
+  assert.equal((await get('/game/0123456789abcdef')).status, 200, 'a finished game’s page');
+  assert.equal((await get('/game/nope')).status, 404);
   assert.equal((await get('/nope')).status, 404, 'four letters with a vowel is not a game code');
   assert.match((await get('/shared/cards.js')).headers.get('content-type'), /javascript/);
   assert.equal((await get('/nope.js')).status, 404);
@@ -558,11 +561,12 @@ test('a game with a human on each team moves their Elo ratings', async () => {
   const { host, code } = await createRoom('Ada', ada);
   const { client: guest } = await joinRoom(code, 'Grace', undefined, grace);
 
-  // New players start at 1000, shown to everyone in the lobby; bots have no rating.
+  // New players start at 1000, shown to everyone in the lobby; each bot shows the rating the bots share.
+  const bots = app.rooms.ratings.rating(BOT_ID);
   await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 3);
   const lobby = await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
-  assert.deepEqual(lobby.members.map((m) => m.rating), [1000, 1000, null, null]);
-  assert.equal(lobby.unrated, null, 'a human on each team: this game will be rated');
+  assert.deepEqual(lobby.members.map((m) => m.rating), [1000, 1000, bots, bots]);
+  assert.equal(lobby.unrated, null);
   assert.ok(!JSON.stringify(lobby).includes(ada), 'the secret never comes back out');
 
   const started = guest.state((s) => s.phase === 'playing');
@@ -573,6 +577,7 @@ test('a game with a human on each team moves their Elo ratings', async () => {
   const guestView = await guest.state((s) => s.phase === 'finished' && s.game.ratingChanges, { fresh: false });
 
   // The human on the winning team gains 16 and the other loses 16; each sees their own row marked.
+  // A bot on each team cancels out, so the bots' rating is not in the list.
   const winnerName = end.game.winner === 'A' ? 'Ada' : 'Grace';
   const sorted = [...hostView.game.ratingChanges].sort((a, b) => b.delta - a.delta);
   assert.deepEqual(sorted.map(({ name, before, after, delta }) => [name, before, after, delta]), [
@@ -582,6 +587,7 @@ test('a game with a human on each team moves their Elo ratings', async () => {
   assert.equal(hostView.game.ratingChanges.find((c) => c.you).name, 'Ada');
   assert.equal(guestView.game.ratingChanges.find((c) => c.you).name, 'Grace');
   assert.equal(hostView.members.find((m) => m.name === winnerName).rating, 1016);
+  assert.equal(app.rooms.ratings.rating(BOT_ID), bots);
 
   // The leaderboard and each player's own standing reflect it.
   const board = await ratingsFor(guest, grace);
@@ -601,33 +607,111 @@ test('a game with a human on each team moves their Elo ratings', async () => {
   assert.equal((await ratingsFor(guest, grace)).me.games, 1);
 });
 
-test('practice games leave ratings alone: bots only, or one player in two seats', async () => {
+test('a game against bots is rated, and moves the rating the bots share', async () => {
+  const solo = secret();
+  const { host } = await createRoom('Solo', solo);
+  await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 2);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 3);
+  const lobby = await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  assert.equal(lobby.unrated, null);
+  const bots = app.rooms.ratings.rating(BOT_ID);
+
+  const started = host.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  await started;
+  const end = await playToEnd([host]);
+
+  // Solo and a bot played two bots. Solo moves by the full amount; the bots had one seat on
+  // Solo's team and two on the other, so they move a third as far, the other way.
+  const won = end.game.winner === 'A';
+  const gain = won ? winnerGain((1000 + bots) / 2, bots) : winnerGain(bots, (1000 + bots) / 2);
+  const share = Math.max(1, Math.round(gain / 3));
+  const row = (c) => [c.name, c.delta, c.after, c.team, c.bot, c.you];
+  assert.equal(end.game.ratingChanges.length, 2);
+  assert.deepEqual(row(end.game.ratingChanges.find((c) => c.you)), ['Solo', won ? gain : -gain, 1000 + (won ? gain : -gain), 'A', false, true]);
+  assert.deepEqual(row(end.game.ratingChanges.find((c) => c.bot)), [BOT_NAME, won ? -share : share, bots + (won ? -share : share), null, true, false]);
+  assert.deepEqual(end.members.filter((m) => m.bot).map((m) => m.rating), Array(3).fill(bots + (won ? -share : share)), 'every bot shows it');
+
+  // Both are on the leaderboard, the bots' row marked as theirs.
+  const board = await ratingsFor(host, solo);
+  assert.equal(board.me.games, 1);
+  assert.deepEqual(board.top.filter((r) => r.bot).map((r) => [r.name, r.rating]), [[BOT_NAME, bots + (won ? -share : share)]]);
+  assert.equal(board.top.find((r) => r.you).bot, undefined);
+});
+
+test('practice games leave ratings alone: one player in two seats, or nobody with a rating', async () => {
   const solo = secret();
   const { host, code } = await createRoom('Solo', solo);
   await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 2);
   await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 3);
-  const lobby = await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
-  assert.equal(lobby.unrated, 'needs-humans');
 
-  const started = host.state((s) => s.phase === 'playing');
-  host.send({ t: 'start' });
-  assert.equal((await started).unrated, 'needs-humans');
-  const end = await playToEnd([host]);
-  assert.equal(end.game.ratingChanges, null);
-  assert.deepEqual((await ratingsFor(host, solo)).me, { rating: 1000, games: 0, wins: 0, losses: 0, rank: null });
-
-  // Back in the lobby, a second tab of the same browser (same secret) joins the other team.
-  await host.act({ t: 'toLobby' }, (s) => s.phase === 'lobby');
+  // A second tab of the same browser (same secret) joins the other team.
   const { client: twin } = await joinRoom(code, 'Solo again', undefined, solo);
   const two = await twin.act({ t: 'team', team: 'B' }, (s) => s.members.find((m) => m.id === s.you).team === 'B');
   assert.equal(two.unrated, 'same-player');
+  const before = [app.rooms.ratings.rating(BOT_ID), (await ratingsFor(host, solo)).me];
+  const started = twin.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  assert.equal((await started).unrated, 'same-player');
+  const end = await playToEnd([host, twin]);
+  assert.equal(end.game.ratingChanges, null);
+  assert.deepEqual([app.rooms.ratings.rating(BOT_ID), (await ratingsFor(host, solo)).me], before);
 
-  // A guest whose browser sent no secret has no rating and can't make a game rated.
-  const { client: guest } = await joinRoom(code, 'Guest');
-  const withGuest = await guest.state(() => true, { fresh: false });
-  assert.equal(withGuest.members.find((m) => m.id === withGuest.you).rating, null);
+  // A guest whose browser sent no secret has no rating, and a game of guests and bots has nobody to rate.
+  const { host: guest } = await createRoom('Guest');
+  await guest.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 2);
+  await guest.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 3);
+  const alone = await guest.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  assert.equal(alone.unrated, 'no-humans');
+  assert.equal(alone.members.find((m) => m.id === alone.you).rating, null);
   assert.equal((await ratingsFor(guest, undefined)).me, null);
   assert.equal((await ratingsFor(guest, 'too-short')).me, null);
+});
+
+test('a finished game can be looked back at: its record, and a note on every move', async () => {
+  const { host } = await createRoom('Ada');
+  await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 2);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 3);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  const started = host.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  const first = await started;
+  assert.equal(first.game.reviewId, null, 'nothing to look back at until it is over');
+  const end = await playToEnd([host]);
+  const id = end.game.reviewId;
+  assert.match(id, /^[0-9a-f]{16}$/);
+
+  const asked = host.next((m) => m.t === 'review');
+  host.send({ t: 'review', id });
+  const { record, analysis } = await asked;
+  assert.deepEqual([record.id, record.deck, record.winner, record.score, record.rated], [id, 54, end.game.winner, end.game.score, false]);
+  assert.deepEqual(record.seats.map((seat) => seat.id), end.game.seats);
+  assert.deepEqual(record.seats.map((seat) => [seat.name, seat.bot]).sort(), [['Ada', false], ['Guppy', true], ['Minnow', true], ['Tetra', true]]);
+  // The deal is every card once, the first hand is the one Ada was dealt, and the log is the whole game.
+  assert.deepEqual(Object.values(record.deal).flat().sort(), buildSets(54).flatMap((set) => set.cards).sort());
+  if (first.game.position === 0) assert.deepEqual(record.deal[first.you], first.game.hand);
+  assert.equal(record.firstTurn, record.log[0].asker ?? record.log[0].declarer ?? record.log[0].player);
+  assert.equal(record.log.length, end.game.position);
+  assert.ok(!JSON.stringify(record).includes('pid'), 'no rating ids in what is sent out');
+
+  // One note for each move, and totals for each seat that add up to the log.
+  assert.equal(analysis.moves.length, record.log.length);
+  const asks = record.log.filter((e) => e.type === 'ask');
+  assert.equal(Object.values(analysis.players).reduce((sum, p) => sum + p.asks, 0), asks.length);
+  assert.equal(Object.values(analysis.players).reduce((sum, p) => sum + p.hits, 0), asks.filter((e) => e.success).length);
+  assert.equal(Object.values(analysis.players).reduce((sum, p) => sum + p.declared + p.misdeclared, 0), 9);
+  assert.deepEqual(Object.keys(analysis.players).sort(), [...end.game.seats].sort());
+
+  // Anyone may look, not only the players; a game that isn't there is said to be missing.
+  const stranger = await connect();
+  const theirs = stranger.next((m) => m.t === 'review');
+  stranger.send({ t: 'review', id });
+  assert.deepEqual((await theirs).record, record);
+  for (const bad of ['0123456789abcdef', '../ratings', undefined]) {
+    const reply = stranger.next((m) => m.t === 'review');
+    stranger.send({ t: 'review', id: bad });
+    assert.deepEqual(await reply, { t: 'review', id: String(bad ?? ''), missing: true });
+  }
 });
 
 test('a connection that sends too much is told so, never just ignored', async () => {
@@ -770,8 +854,9 @@ test('a profile holds the player’s games and totals, rated or not', async () =
   const [game] = mine.games;
   assert.deepEqual(
     // (seats are shuffled, so the order of names isn't fixed)
-    { ...game, endedAt: null, minutes: null, foes: [...game.foes].sort() },
+    { ...game, id: null, endedAt: null, minutes: null, foes: [...game.foes].sort() },
     {
+      id: null,
       endedAt: null,
       minutes: null,
       deck: 54,
@@ -785,6 +870,7 @@ test('a profile holds the player’s games and totals, rated or not', async () =
     },
   );
   assert.ok(Date.now() - game.endedAt < 5000 && game.minutes >= 1);
+  assert.equal(game.id, end.game.reviewId, 'each game in the list leads to its review');
   const theirs = await profileOf(guest, grace);
   assert.deepEqual([theirs.games[0].won, theirs.games[0].score, theirs.games[0].mates], [!adaWon, [end.game.score.B, end.game.score.A], ['Minnow']]);
 
@@ -792,15 +878,16 @@ test('a profile holds the player’s games and totals, rated or not', async () =
   const after = await lobbyWith(watcher, (m) => m.played > lobby.played);
   assert.equal(after.played, lobby.played + 1);
 
-  // A practice game (Ada alone with bots) is remembered too, but moves no rating.
+  // A practice game (Ada against herself, from a second tab) is remembered too, but moves no rating.
   await host.act({ t: 'toLobby' }, (s) => s.phase === 'lobby');
   guest.send({ t: 'leave' });
   await host.state((s) => s.members.length === 3);
-  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
-  const again = host.state((s) => s.phase === 'playing');
+  const { client: twin } = await joinRoom(code, 'Ada too', undefined, ada);
+  await twin.act({ t: 'team', team: 'B' }, (s) => s.members.find((m) => m.id === s.you).team === 'B');
+  const again = twin.state((s) => s.phase === 'playing');
   host.send({ t: 'start' });
   await again;
-  await playToEnd([host]);
+  await playToEnd([host, twin]);
   mine = await profileOf(host, ada);
   assert.deepEqual([mine.stats.games, mine.stats.rated, mine.games.length], [2, 1, 2]);
   assert.deepEqual([mine.games[0].rated, mine.games[0].delta, mine.games[0].after], [false, null, null]);

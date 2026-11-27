@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -31,7 +31,7 @@ test('each player sees a game from their own side', () => {
   const ann = history.forPlayer('ann');
   assert.deepEqual(ann.stats, { games: 1, wins: 1, losses: 0, rated: 1, setsWon: 6, setsLost: 3, streak: 1, bestStreak: 1 });
   assert.deepEqual(ann.games, [
-    { endedAt: 600_000, minutes: 8, deck: 54, rated: true, won: true, score: [6, 3], mates: ['Guppy'], foes: ['Bob', 'Cy'], delta: 16, after: 1016 },
+    { id: null, endedAt: 600_000, minutes: 8, deck: 54, rated: true, won: true, score: [6, 3], mates: ['Guppy'], foes: ['Bob', 'Cy'], delta: 16, after: 1016 },
   ]);
 
   const bob = history.forPlayer('bob');
@@ -79,6 +79,40 @@ test('games survive a restart, even past a line damaged by a crash', async () =>
     second.add(game({ winner: 'A', endedAt: 3_000_000 }));
     await second.writing;
     assert.equal(new History({ file }).forPlayer('ann').stats.games, 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a game’s full record is kept under its id and read back when asked for', async () => {
+  const id = '0123456789abcdef';
+  const record = { id, deck: 54, deal: { p1: ['2S'] }, log: [] };
+
+  // With nowhere to write, records stay in memory.
+  const inMemory = new History();
+  inMemory.add({ ...game(), id }, record);
+  inMemory.add(game()); // a game from before records were kept has none
+  assert.deepEqual(await inMemory.record(id), record);
+  assert.deepEqual(inMemory.forPlayer('ann').games.map((g) => g.id), [null, id], 'the list says which games can be played back');
+
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'fish-records-'));
+  try {
+    const file = path.join(dir, 'games.jsonl');
+    const first = new History({ file });
+    first.add({ ...game(), id }, record);
+    // Asked for straight away, before the write has finished, it is still found.
+    assert.deepEqual(await first.record(id), record);
+    assert.ok(existsSync(path.join(dir, 'games', `${id}.json`)));
+    assert.ok(!readFileSync(file, 'utf8').includes('deal'), 'the list of games stays small');
+
+    const second = new History({ file });
+    assert.deepEqual(await second.record(id), record, 'and after a restart');
+    assert.equal(second.forPlayer('ann').games[0].id, id);
+
+    // Only an id is ever turned into a file name.
+    for (const bad of ['fedcba9876543210', '../ratings', '..%2Fratings', `${id}/../x`, id.toUpperCase(), '', null, undefined, 12, {}]) {
+      assert.equal(await second.record(bad), null);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

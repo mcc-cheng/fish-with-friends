@@ -4,12 +4,13 @@
 // supplies real ones and sets nothing else on them. This module adds
 // conn.room and conn.member once the connection has joined a room.
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { sortCards } from '../shared/cards.js';
+import { analyse } from './analysis.js';
 import { chooseMove } from './bot.js';
-import { ask, canDeclare, createGame, declare, DECLARE_RULES, otherTeam, shuffle, timeout } from './game.js';
+import { ask, canDeclare, createGame, declare, DECLARE_RULES, otherTeam, recordOf, shuffle, timeout } from './game.js';
 import { History } from './history.js';
-import { Ratings, playerId } from './ratings.js';
+import { BOT_ID, Ratings, playerId } from './ratings.js';
 
 export const TEAM_MIN = 2;
 export const TEAM_MAX = 4;
@@ -19,6 +20,7 @@ const LOBBY_GAMES_MAX = 50; // rooms listed in the lobby
 const CHAT_MAX = 100; // lobby chat messages kept for people who arrive later
 const CHAT_LENGTH = 240;
 const CHAT_GAP_MS = 700; // the least time between one person's messages
+const REVIEWS_KEPT = 30; // analysed games held ready, for the several players who open the same one
 const CODE_LETTERS = 'BCDFGHJKLMNPQRSTVWXZ'; // no vowels, so codes never spell words
 const BOT_NAMES = ['Guppy', 'Minnow', 'Tetra', 'Koi', 'Pike', 'Trout', 'Perch', 'Bass'];
 // The first value of each setting is its default.
@@ -65,6 +67,7 @@ export class Rooms {
     this.conns = new Set(); // every connection that has sent us anything
     this.chat = []; // recent lobby chat
     this.chatSeq = 0;
+    this.reviews = new Map(); // game id -> the answer to 'review', for the games asked about lately
     this.lobbyTimer = null;
     this.options = {
       botDelay: [1200, 2200], // ms a bot "thinks" before moving: [min, max]
@@ -98,6 +101,7 @@ export class Rooms {
       const mine = conn.pid ? this.history.forPlayer(conn.pid) : { stats: null, games: [] };
       return conn.send({ t: 'profile', me: conn.pid ? this.ratings.profile(conn.pid) : null, ...mine });
     }
+    if (msg.t === 'review') return this.review(conn, msg);
     if (msg.t === 'create') return this.create(conn, msg);
     if (msg.t === 'join') return this.join(conn, msg);
     const { room, member } = conn;
@@ -174,6 +178,28 @@ export class Rooms {
     this.chat.push(message);
     if (this.chat.length > CHAT_MAX) this.chat.shift();
     for (const other of this.conns) if (!other.room) other.send({ t: 'chat', message });
+  }
+
+  // ---- looking back at a finished game ----
+
+  /**
+   * Sends the record of a finished game and the analysis of it. Anyone with the
+   * game's id may ask: once a game is over its cards are no secret.
+   */
+  async review(conn, msg) {
+    const id = String(msg.id ?? '');
+    try {
+      if (!this.reviews.has(id)) {
+        const record = await this.history.record(id);
+        if (!record) return conn.send({ t: 'review', id, missing: true });
+        this.reviews.set(id, { t: 'review', id, record, analysis: analyse(record) });
+        if (this.reviews.size > REVIEWS_KEPT) this.reviews.delete(this.reviews.keys().next().value);
+      }
+      conn.send(this.reviews.get(id));
+    } catch (error) {
+      console.error(`Could not analyse game ${id}`, error);
+      conn.send({ t: 'review', id, missing: true });
+    }
   }
 
   // ---- joining and leaving ----
@@ -403,10 +429,11 @@ export class Rooms {
         // Ratings go to whoever sat down at the start, even if they leave or someone takes over their seat.
         room.rating = {
           unrated: this.unratedReason(room),
-          players: [...a, ...b].map((m) => ({ pid: m.pid, name: m.name, team: m.team, bot: m.isBot })),
+          players: [...a, ...b].map((m) => ({ id: m.id, pid: m.pid, name: m.name, team: m.team, bot: m.isBot })),
           startedAt: Date.now(),
           recorded: false,
           changes: null,
+          gameId: null, // set once the game is in the history, where it can be looked back at
         };
         room.game = createGame({
           seats: first.flatMap((m, i) => [m, second[i]]),
@@ -542,7 +569,7 @@ export class Rooms {
         online: m.connected,
         auto: m.botControlled,
         cards: game?.hands.get(m.id)?.size ?? null,
-        rating: m.pid ? this.ratings.rating(m.pid) : null,
+        rating: m.isBot ? this.ratings.rating(BOT_ID) : m.pid ? this.ratings.rating(m.pid) : null,
         // Extra time left for the game, in ms (only for seated players in a timed game).
         bank: (m.id === clock?.player ? clock.bank : room.clock?.bank.get(m.id)) ?? null,
       })),
@@ -559,8 +586,8 @@ export class Rooms {
         position: game.log.length, // counts every move, even when the visible log is cut short
         awaitingNext: room.settings.botPace === 'step' && Boolean(this.botToMove(room)),
         clock, // who is on the clock and how long they have left, as of this message
-
         ratingChanges: room.rating?.changes?.map(({ id, ...change }) => ({ ...change, you: id === member.pid })) ?? null,
+        reviewId: room.rating?.gameId ?? null, // the finished game's id in the history
       },
     };
   }
@@ -569,14 +596,15 @@ export class Rooms {
 
   /**
    * Why a game between the current teams would not be rated, or null if it would.
-   * A game counts when each team has at least one identified human (so beating
-   * bots alone earns nothing) and nobody is sitting in two seats.
+   * A game counts when at least one identified human is playing (the bots have a
+   * rating of their own, so a game against them counts) and nobody is sitting in
+   * two seats.
    */
   unratedReason(room) {
     const players = [...room.members.values()].filter((m) => m.team);
     const ids = players.map((m) => m.pid).filter(Boolean);
     if (new Set(ids).size !== ids.length) return 'same-player';
-    if (!['A', 'B'].every((team) => players.some((m) => m.team === team && m.pid))) return 'needs-humans';
+    if (ids.length === 0) return 'no-humans';
     return null;
   }
 
@@ -589,25 +617,34 @@ export class Rooms {
     if (game?.phase !== 'finished' || !rating || rating.recorded) return;
     rating.recorded = true;
     if (!rating.unrated) {
-      const side = (team) => rating.players.filter((p) => p.team === team).map((p) => ({ id: p.pid, name: p.name }));
-      const teamOf = new Map(rating.players.map((p) => [p.pid, p.team]));
+      const idOf = (p) => (p.bot ? BOT_ID : p.pid);
+      const side = (team) => rating.players.filter((p) => p.team === team).map((p) => ({ id: idOf(p), name: p.name }));
+      // The team to show a change under. The bots have one only if they all sat on the same side.
+      const teamsOf = (id) => new Set(rating.players.filter((p) => idOf(p) === id).map((p) => p.team));
       rating.changes = this.ratings
         .recordGame({ winners: side(game.winner), losers: side(otherTeam(game.winner)) })
-        .map((change) => ({ ...change, team: teamOf.get(change.id) }));
+        .map((change) => ({ ...change, team: teamsOf(change.id).size === 1 ? [...teamsOf(change.id)][0] : null, bot: change.id === BOT_ID }))
+        .sort((a, b) => a.bot - b.bot); // the players first, then the bots
     }
     const changeOf = new Map((rating.changes ?? []).map((change) => [change.id, change]));
-    this.history.add({
-      startedAt: rating.startedAt,
-      endedAt: Date.now(),
-      deck: game.deck,
-      score: { ...game.score },
-      winner: game.winner,
-      rated: !rating.unrated,
-      players: rating.players.map((p) => {
-        const change = changeOf.get(p.pid);
-        return change ? { ...p, delta: change.delta, after: change.after } : p;
-      }),
-    });
+    const endedAt = Date.now();
+    const summary = { startedAt: rating.startedAt, endedAt, deck: game.deck, score: { ...game.score }, winner: game.winner, rated: !rating.unrated };
+    // The full record names the players as they were when they sat down, and carries no rating ids.
+    const seated = new Map(rating.players.map((p) => [p.id, p]));
+    const record = recordOf(game);
+    record.seats = record.seats.map((seat) => ({ ...seat, name: seated.get(seat.id).name, bot: seated.get(seat.id).bot }));
+    rating.gameId = randomBytes(8).toString('hex');
+    this.history.add(
+      {
+        id: rating.gameId,
+        ...summary,
+        players: rating.players.map(({ id, ...p }) => {
+          const change = changeOf.get(p.pid);
+          return change ? { ...p, delta: change.delta, after: change.after } : p;
+        }),
+      },
+      { id: rating.gameId, ...summary, ...record },
+    );
   }
 
   // ---- the clock ----

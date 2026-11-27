@@ -2,7 +2,7 @@
 // Every function mutates the game object it is given and reports problems as
 // { ok: false, error } instead of throwing, so the caller can relay them to a player.
 
-import { buildSets } from '../shared/cards.js';
+import { buildSets, sortCards } from '../shared/cards.js';
 
 export const otherTeam = (team) => (team === 'A' ? 'B' : 'A');
 
@@ -28,18 +28,62 @@ export function createGame({ seats, deck = 54, declareRule = 'team', rng = Math.
   const cards = shuffle(sets.flatMap((set) => set.cards), rng);
   const dealer = Math.floor(rng() * seats.length);
   cards.forEach((card, i) => hands.get(seats[(dealer + i) % seats.length].id).add(card));
+  const turn = seats[Math.floor(rng() * seats.length)].id;
   return {
     deck,
     declareRule,
     seats: seats.map(({ id, team }) => ({ id, team })),
     sets,
     hands,
-    turn: seats[Math.floor(rng() * seats.length)].id,
+    turn,
     score: { A: 0, B: 0 },
     log: [],
     phase: 'playing',
     winner: null,
+    // How it began. With the log, this is enough to play the whole game back.
+    deal: Object.fromEntries([...hands].map(([id, hand]) => [id, sortCards([...hand])])),
+    firstTurn: turn,
   };
+}
+
+/** A game as plain data, for keeping: how it began, every move, and how it stands. */
+export function recordOf(game) {
+  const { deck, declareRule, seats, deal, firstTurn, log, score, winner } = game;
+  return structuredClone({ deck, declareRule, seats, deal, firstTurn, log, score, winner });
+}
+
+/**
+ * Plays a recorded game back from the deal. `visit(game, event, i)` is called
+ * before each move is made, with the game as it stood at that moment. Returns
+ * the game as the record leaves it. Throws if the record is not a game that
+ * could have been played.
+ */
+export function replay(record, visit = () => {}) {
+  const game = {
+    deck: record.deck,
+    declareRule: record.declareRule,
+    seats: record.seats.map(({ id, team }) => ({ id, team })),
+    sets: buildSets(record.deck).map((set) => ({ ...set, claimedBy: null })),
+    hands: new Map(record.seats.map((seat) => [seat.id, new Set(record.deal[seat.id])])),
+    turn: record.firstTurn,
+    score: { A: 0, B: 0 },
+    log: [],
+    phase: 'playing',
+    winner: null,
+    deal: record.deal,
+    firstTurn: record.firstTurn,
+  };
+  record.log.forEach((event, i) => {
+    visit(game, event, i);
+    const result =
+      event.type === 'ask'
+        ? ask(game, event.asker, event.target, event.card)
+        : event.type === 'declare'
+          ? declare(game, event.declarer, event.set, event.assignment)
+          : timeout(game, event.player);
+    if (!result.ok) throw new Error(`Move ${i + 1} of the record can't be played: ${result.error}`);
+  });
+  return game;
 }
 
 const fail = (error) => ({ ok: false, error });

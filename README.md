@@ -4,8 +4,9 @@ An online version of **Fish** (also called Literature or Canadian Fish), the tea
 opponents for cards, keep track of who has what, and declare whole sets.
 
 The site opens on a lobby: a list of public games to join or watch, a chat, and buttons to start a public
-or a private game. Bots can fill empty seats, games between people are Elo-rated, and each browser has a
-profile with its statistics and every game it has finished.
+or a private game. Bots can fill empty seats, games are Elo-rated (the bots have a rating too), and each
+browser has a profile with its statistics and every game it has finished. A finished game can be looked
+back at move by move, with every hand face up and a note on each move.
 
 ## Run it
 
@@ -35,9 +36,10 @@ Node and allows WebSockets (Render, Fly.io, Railway, a VPS), or expose your own 
 as `cloudflared tunnel --url http://localhost:3000`.
 
 Rooms and the lobby chat live in memory, so run a single instance, and expect games in progress to end if
-the server restarts. Two things are written to disk: ratings (`data/ratings.json`) and finished games
-(`data/games.jsonl`). On a host with a throwaway filesystem, point `DATA_DIR` at a persistent volume or
-ratings and profiles reset on every deploy.
+the server restarts. Three things are written to disk: ratings (`data/ratings.json`), the list of finished
+games (`data/games.jsonl`), and the full record of each one, its deal and every move (`data/games/<id>.json`).
+On a host with a throwaway filesystem, point `DATA_DIR` at a persistent volume or ratings, profiles and
+reviews reset on every deploy.
 
 ## Finding your way around
 
@@ -100,19 +102,42 @@ the leaderboard.
   rating and your games under a hash of it. Clearing site data or switching browser starts a new record
   at 1000, and two people can have the same name on the leaderboard.
 - **Your profile.** Every game you finish is listed there, rated or not, with the score, who you played
-  with and against, and the rating change. Games the host ends early are not recorded.
-- **Which games count.** A game is rated when each team has at least one human player and nobody is in two
-  seats (two tabs of one browser are the same player). Anything else is a practice game, and the lobby
-  says which it will be. A game the host ends early changes nothing.
-- **How much moves.** A team's rating is the average of its players, with bots counted as 1000. The
-  winners' expected score is `1 / (1 + 10^((losers - winners) / 400))`, and every winner gains
-  `32 x (1 - expected)` points, rounded, which every loser drops. Evenly matched teams move 16; beating a
-  stronger team is worth more. The margin in sets doesn't matter.
+  with and against, the rating change, and a link to its review. Games the host ends early are not recorded.
+- **Which games count.** Every game is rated, against people or bots, unless the same player is in two
+  seats (two tabs of one browser are the same player) or nobody playing has a rating to play for. Those
+  are practice games, and the lobby says which it will be. A game the host ends early changes nothing.
+- **How much moves.** A team's rating is the average of its players. The winners' expected score is
+  `1 / (1 + 10^((losers - winners) / 400))`, and every winner gains `32 x (1 - expected)` points, rounded,
+  which every loser drops. Evenly matched teams move 16; beating a stronger team is worth more. The
+  margin in sets doesn't matter.
+- **The bots.** Every bot runs the same program, so the bots share one rating. It is shown beside each
+  bot, counts as that bot's rating in its team's average, and has a row on the leaderboard. After a rated
+  game it moves once, however many seats the bots filled: by the full amount if they were all on one
+  team, and by the balance of their seats if they were on both (one seat on the winning team and two on
+  the losing team loses a third). The same number on each team cancels out.
 - **Who gets the points.** Whoever was seated when the game started, even if they leave or someone takes
   over their seat.
 
 Ratings rest on trust: anyone could open two browsers and feed one rating from the other. That is fine
 among friends and not something to build a public ladder on.
+
+## Looking back at a game
+
+When a game ends, **Review the game** opens it at `/game/<id>`: a page anyone with the link can see, since
+a finished game has no secrets. It shows every hand at every move, the move made, and a note on it. Step
+with the buttons, the arrow keys, the slider, or by clicking a move in the list.
+
+The notes say what the player could have known when they moved, from their own cards and the questions
+asked up to then, never from the hidden hands:
+
+- a question is a **sure thing** if the card was certain to be there, one that **couldn't work** if it was
+  known to be elsewhere, and a guess otherwise, with a mention of any sure card that was passed up;
+- a declaration says how many of the set's cards the declarer could place.
+
+A table under the hands counts these up for each player. The notes come from `analyse(record)` in
+`server/analysis.js`, which takes a game's record (`recordOf` in `server/game.js`: the seats, the deal, who
+played first and the log) and returns one note per move. That function is the place to plug in a stronger
+judge of the moves.
 
 ## Code map
 
@@ -121,13 +146,14 @@ shared/cards.js   card and set definitions, used by server and browser
 public/fonts/     Roboto, the typeface, bundled under the SIL Open Font Licence (licence alongside)
 server/game.js    the rules: deal, ask, declare, turn passing, scoring (no networking)
 server/bot.js     computer player; works only from its hand and the public log
+server/analysis.js notes on a finished game: what each player could have known at each move
 server/ratings.js Elo arithmetic and the JSON file ratings are kept in
-server/history.js the record of finished games, read back for profiles
+server/history.js the record of finished games, read back for profiles and reviews
 server/rooms.js   rooms, the lobby and its chat, reconnects, and the per-player view of a game
 server/app.js     HTTP static files + WebSocket transport
 server/index.js   entry point
 public/           the browser client (plain ES modules, no build step)
-test/             rules, bot self-play, ratings, history, and end-to-end tests over real WebSockets
+test/             rules, bot self-play, ratings, history, analysis, and end-to-end tests over real WebSockets
 ```
 
 The server is the only authority: clients send `ask` and `declare` messages, the server checks them

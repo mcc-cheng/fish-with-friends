@@ -56,10 +56,10 @@ async function serveStatic(req, res) {
   }
   if (pathname === '/healthz') return send(200, 'ok');
 
-  // The lobby, the help and profile pages, and "/ABCD" (a room link) all load the app.
+  // The lobby, the help and profile pages, "/ABCD" (a room link) and "/game/<id>" (a finished game) all load the app.
   let base = PUBLIC;
   let relative = pathname;
-  if (['/', '/help', '/profile'].includes(pathname) || /^\/[BCDFGHJKLMNPQRSTVWXZ]{4}$/i.test(pathname)) relative = '/index.html';
+  if (['/', '/help', '/profile'].includes(pathname) || /^\/[BCDFGHJKLMNPQRSTVWXZ]{4}$/i.test(pathname) || /^\/game\/[0-9a-f]{16}$/.test(pathname)) relative = '/index.html';
   else if (pathname.startsWith('/shared/')) [base, relative] = [SHARED, pathname.slice('/shared'.length)];
   const file = path.join(base, relative);
   if (!file.startsWith(base + path.sep)) return send(404, 'Not found');
@@ -72,8 +72,9 @@ async function serveStatic(req, res) {
 
 /**
  * @param {object} options  Options for Rooms, plus:
- *   `dataDir`: a folder for what should outlive a restart: Elo ratings (ratings.json)
- *     and the record of finished games (games.jsonl). Without it they last only as long as the process.
+ *   `dataDir`: a folder for what should outlive a restart: Elo ratings (ratings.json),
+ *     the list of finished games (games.jsonl) and the full record of each (games/<id>.json).
+ *     Without it they last only as long as the process.
  *   `messagesPer10s`: how many messages one connection may send in ten seconds.
  *     Stepping through bot moves takes one per move, so it has to leave room for quick clicking.
  */

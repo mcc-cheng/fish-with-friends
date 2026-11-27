@@ -2,7 +2,7 @@
 // it sends and turns clicks into messages. There is no build step: render()
 // rebuilds a DOM tree from `state` and morph() patches the live page to match.
 
-import { buildSets, cardInfo, setIdOf } from '/shared/cards.js';
+import { buildSets, cardInfo, setIdOf, sortCards } from '/shared/cards.js';
 
 const TEAM_NAMES = { A: 'Orange', B: 'Purple' };
 const other = (team) => (team === 'A' ? 'B' : 'A');
@@ -148,12 +148,16 @@ function themeButton() {
 // Room codes have no vowels, so a page like "/help" is never mistaken for one.
 const ROOM_PATH = /^\/([BCDFGHJKLMNPQRSTVWXZ]{4})$/i;
 const PAGES = { '/help': 'help', '/profile': 'profile' };
+const REVIEW_PATH = /^\/game\/([0-9a-f]{16})$/; // a finished game, looked back at
 
 const state = {
   status: 'connecting', // connecting | open | closed
   view: null, // the latest room state from the server
   code: (location.pathname.match(ROOM_PATH)?.[1] ?? '').toUpperCase() || null, // the room we are in, or on our way into
-  page: PAGES[location.pathname] ?? 'lobby', // the screen to show when not in a room: lobby | help | profile
+  page: PAGES[location.pathname] ?? (REVIEW_PATH.test(location.pathname) ? 'review' : 'lobby'), // the screen to show when not in a room: lobby | help | profile | review
+  reviewId: location.pathname.match(REVIEW_PATH)?.[1] ?? null,
+  review: null, // { id, record, analysis, frames } once it arrives, or { id, missing: true }
+  reviewStep: 0, // 0 is the deal; k is the position in which move k was made
   name: playerName(),
   busy: false,
   lobby: null, // { games, yours, online, played }: what the lobby lists
@@ -194,6 +198,7 @@ function connect() {
     // A room link, or a room we were in before the connection dropped: go (back) in.
     if (state.code) send({ t: 'join', code: state.code, name: state.name, token: loadSession(state.code)?.token, player: PLAYER });
     else if (state.page === 'profile') send({ t: 'profile' });
+    else if (state.page === 'review' && !state.review) send({ t: 'review', id: state.reviewId });
     render();
   };
   ws.onmessage = (event) => receive(JSON.parse(event.data));
@@ -246,6 +251,11 @@ function receive(msg) {
       break;
     case 'profile':
       state.profile = { me: msg.me, stats: msg.stats, games: msg.games };
+      break;
+    case 'review':
+      if (msg.id !== state.reviewId) break;
+      state.review = msg.missing ? { id: msg.id, missing: true } : { id: msg.id, record: msg.record, analysis: msg.analysis, frames: reviewFrames(msg.record) };
+      state.reviewStep = 0;
       break;
     case 'error':
       state.busy = false;
@@ -478,6 +488,14 @@ function render() {
   morph(root, h('div', { id: 'app' }, screen(), statusBar(), toastEl()));
   const chatNow = root.querySelector('.chat-list');
   if (chatNow && atEnd) chatNow.scrollTop = chatNow.scrollHeight;
+  // In a review, the list of moves follows the move being looked at.
+  if (state.page === 'review' && state.reviewShown !== state.reviewStep) {
+    state.reviewShown = state.reviewStep;
+    const list = root.querySelector('.review-list');
+    const row = list?.querySelector('.current');
+    if (row) list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - (list.clientHeight - row.offsetHeight) / 2;
+    else if (list) list.scrollTop = 0;
+  }
 
   const game = state.view?.game;
   document.title = game?.turn && game.turn === state.view.you ? 'Your turn · Fish' : 'Fish with Friends';
@@ -496,6 +514,7 @@ function screen() {
   if (state.code) return h('div', { class: 'page' }, topbar(), h('main', { class: 'notice' }, h('p', { class: 'muted' }, 'Joining the game…')));
   if (state.page === 'help') return helpScreen();
   if (state.page === 'profile') return profileScreen();
+  if (state.page === 'review') return reviewScreen();
   return lobbyScreen();
 }
 
@@ -810,7 +829,7 @@ function leaderboard() {
     'div',
     { class: 'board' },
     me?.games ? h('p', { class: 'board-me' }, 'Your rating is ', h('strong', {}, me.rating), `: rank ${me.rank}, ${me.wins} won and ${me.losses} lost.`) : null,
-    top.length === 0 ? h('p', { class: 'muted' }, 'No rated games yet. Everyone starts at 1000, and ratings move after each game with a human player on both teams.') : null,
+    top.length === 0 ? h('p', { class: 'muted' }, 'No rated games yet. Everyone starts at 1000, the bots included, and ratings move after each game.') : null,
     h(
       'ol',
       { class: 'board-list' },
@@ -821,6 +840,7 @@ function leaderboard() {
           h('span', { class: 'board-rank' }, row.rank),
           h('span', { class: 'nm' }, row.name),
           row.you ? tag('you') : null,
+          row.bot ? h('span', { class: 'tag', title: 'Every bot plays the same way, so they share one rating' }, 'all bots') : null,
           h('span', { class: 'board-record', title: `${row.wins} won, ${row.losses} lost` }, `${row.wins}–${row.losses}`),
           h('span', { class: 'board-rating' }, row.rating),
         ),
@@ -887,14 +907,14 @@ function profileScreen() {
             { class: 'panel history' },
             h('h2', {}, 'Games'),
             profile.games.length === 0
-              ? h('p', { class: 'muted' }, 'You haven’t finished a game yet. Every game you play to the end will be listed here.')
+              ? h('p', { class: 'muted' }, 'You haven’t finished a game yet. Every game you play to the end will be listed here, to look back at move by move.')
               : h(
                   'div',
                   { class: 'table-scroll' },
                   h(
                     'table',
                     { class: 'games' },
-                    h('thead', {}, h('tr', {}, ['Played', 'Result', 'Score', 'With', 'Against', 'Deck', 'Rating'].map((label) => h('th', { scope: 'col' }, label)))),
+                    h('thead', {}, h('tr', {}, ['Played', 'Result', 'Score', 'With', 'Against', 'Deck', 'Rating', ''].map((label) => h('th', { scope: 'col' }, label)))),
                     h(
                       'tbody',
                       {},
@@ -915,6 +935,7 @@ function profileScreen() {
                               ? [h('span', { class: cls('delta', game.delta > 0 ? 'up' : 'down') }, game.delta > 0 ? `+${game.delta}` : `−${-game.delta}`), ' ', h('span', { class: 'muted' }, game.after)]
                               : h('span', { class: 'muted' }, 'practice'),
                           ),
+                          h('td', {}, game.id ? h('a', { class: 'review-link', href: `/game/${game.id}` }, 'Review') : null),
                         ),
                       ),
                     ),
@@ -923,6 +944,263 @@ function profileScreen() {
           )
         : null,
     ),
+  );
+}
+
+// ---- review: a finished game played back, every hand face up, with a note on each move
+
+/**
+ * The game at every move: frames[i] is how things stood when move i + 1 was
+ * made, and the last frame is how it ended.
+ */
+function reviewFrames(record) {
+  const sets = buildSets(record.deck);
+  const hands = new Map(record.seats.map((seat) => [seat.id, new Set(record.deal[seat.id])]));
+  const score = { A: 0, B: 0 };
+  let turn = record.firstTurn;
+  const snap = () => ({ hands: new Map([...hands].map(([id, hand]) => [id, sortCards([...hand])])), score: { ...score }, turn });
+  const frames = [];
+  for (const event of record.log) {
+    frames.push(snap());
+    if (event.type === 'ask' && event.success) {
+      hands.get(event.target).delete(event.card);
+      hands.get(event.asker).add(event.card);
+    } else if (event.type === 'declare') {
+      for (const card of sets.find((set) => set.id === event.set).cards) for (const hand of hands.values()) hand.delete(card);
+      score[event.team] += 1;
+    }
+    turn = event.nextTurn;
+  }
+  frames.push(snap());
+  return frames;
+}
+
+function reviewTo(step) {
+  const moves = state.review?.record?.log.length ?? 0;
+  state.reviewStep = Math.min(moves, Math.max(0, step));
+  render();
+}
+
+/** What a move's note says: a short label, how it reads (good | bad | plain), and a sentence of detail. */
+function reviewNote(name, event, note) {
+  if (!note) return null;
+  if (note.kind === 'sure') return { label: 'sure thing', tone: 'good', detail: [name(event.asker), ' could be certain ', name(event.target), ' held it.'] };
+  // A card that was certain to be had for the asking, when the one asked for was not.
+  const offer = note.sure?.length
+    ? [' A sure card was there to take: ', note.sure.map(({ card, from }, i) => [i ? ', ' : null, cardChip(card), ' from ', name(from)]), '.']
+    : null;
+  if (note.kind === 'dead') {
+    const why = note.holder ? [name(event.asker), ' could have known ', name(note.holder), ' held it.'] : [name(event.asker), ' could have known ', name(event.target), ' didn’t have it.'];
+    return { label: 'couldn’t work', tone: 'bad', detail: [why, offer] };
+  }
+  if (note.kind === 'guess') {
+    return { label: offer ? 'missed a sure card' : 'guess', tone: offer ? 'bad' : 'plain', detail: [`${offer ? 'A guess: it' : 'It'} could have been with any of ${note.places} players.`, offer] };
+  }
+  const all = note.known === note.of;
+  const knew = `${note.known} of the ${note.of} cards`;
+  if (event.correct) {
+    return all
+      ? { label: 'sure thing', tone: 'good', detail: [name(event.declarer), ' could place every card.'] }
+      : { label: 'guess', tone: 'plain', detail: [name(event.declarer), ` could place ${knew}, and guessed the rest right.`] };
+  }
+  return { label: all ? 'slip' : 'guess', tone: 'bad', detail: [name(event.declarer), all ? ' could have placed every card.' : ` could place ${knew}.`] };
+}
+
+function reviewScreen() {
+  const review = state.review;
+  const shell = (...body) => h('div', { class: 'page' }, topbar(), h('main', { class: 'review' }, body));
+  if (!review) return shell(h('p', { class: 'muted notice' }, 'Loading the game…'));
+  if (review.missing) {
+    return shell(h('div', { class: 'notice' }, h('p', {}, 'That game isn’t in the records.'), h('p', { class: 'muted' }, 'Games are kept from the moment they finish. ', h('a', { href: '/' }, 'Back to the lobby'))));
+  }
+
+  const { record, analysis, frames } = review;
+  const moves = record.log.length;
+  const step = Math.min(state.reviewStep, moves);
+  const event = step ? record.log[step - 1] : null;
+  const note = step ? analysis.moves[step - 1] : null;
+  const frame = frames[Math.max(0, step - 1)];
+  const sets = buildSets(record.deck);
+  const seatOf = new Map(record.seats.map((seat) => [seat.id, seat]));
+  const name = (id) => h('span', { class: `who team-${seatOf.get(id).team}` }, seatOf.get(id).name);
+  const teamName = (team) => h('span', { class: `who team-${team}` }, TEAM_NAMES[team]);
+  const setOf = (id) => sets.find((set) => set.id === id);
+
+  /** A move in a few words, as in the game's log. */
+  const told = (e) => {
+    if (e.type === 'ask') return [name(e.asker), ' asked ', name(e.target), ' for ', cardChip(e.card)];
+    if (e.type === 'timeout') return [name(e.player), ' ran out of time'];
+    const theirs = e.named !== seatOf.get(e.declarer).team;
+    return [name(e.declarer), e.correct ? ' declared ' : ' misdeclared ', h('strong', {}, setOf(e.set).name), theirs ? [' from ', teamName(e.named), '’s hands'] : null];
+  };
+
+  // ---- the move being looked at
+  const said = event ? reviewNote(name, event, note) : null;
+  const good = event && (event.type === 'ask' ? event.success : event.type === 'declare' && event.correct);
+  let story;
+  if (!event) story = ['The cards are dealt. ', name(frame.turn), ' plays first.'];
+  else if (event.type === 'ask') story = [told(event), event.success ? ' and got it.' : [', but ', name(event.target), ' didn’t have it.']];
+  else if (event.type === 'timeout') story = [told(event), ' and lost the turn to ', name(event.nextTurn), '.'];
+  else story = [told(event), event.correct ? '. A set for ' : '. The set went to ', teamName(event.team), '.'];
+  const moveBox = h(
+    'section',
+    { class: cls('panel review-move', event && (good ? 'good' : 'bad')), 'aria-live': 'polite' },
+    h('p', { class: 'banner-text' }, story),
+    event?.type === 'declare' && !event.correct
+      ? h(
+          'div',
+          { class: 'reveal' },
+          setOf(event.set)
+            .cards.filter((card) => event.actual[card] !== event.assignment[card])
+            .map((card) => h('span', { class: 'reveal-item wrong' }, cardChip(card), ' ', name(event.actual[card]), h('span', { class: 'muted' }, ' (said ', name(event.assignment[card]), ')'))),
+        )
+      : null,
+    said ? h('p', { class: 'review-note' }, h('span', { class: `tag ${said.tone}` }, said.label), ' ', said.detail) : null,
+  );
+
+  // ---- everyone's cards at that moment
+  const marked = new Map(); // card -> how to mark it: the card asked for, or the cards of the set being declared
+  if (event?.type === 'ask') marked.set(event.card, 'hot');
+  if (event?.type === 'declare') for (const card of setOf(event.set).cards) marked.set(card, event.actual[card] === event.assignment[card] ? 'hot' : 'hot wrong');
+  const part = (id) => {
+    if (!event) return id === frame.turn ? 'plays first' : null;
+    if (event.type === 'ask') return id === event.asker ? 'asks' : id === event.target ? 'is asked' : null;
+    if (event.type === 'declare') return id === event.declarer ? 'declares' : null;
+    return id === event.player ? 'out of time' : null;
+  };
+  const seatRow = (seat) => {
+    const cards = frame.hands.get(seat.id);
+    const runs = sets.map((set) => cards.filter((card) => set.cards.includes(card))).filter((run) => run.length);
+    return h(
+      'div',
+      { class: cls('review-seat', `team-${seat.team}`, part(seat.id) && 'acting') },
+      h(
+        'div',
+        { class: 'review-who' },
+        h('span', { class: 'nm', title: seat.name }, seat.name),
+        seat.bot ? tag('bot') : null,
+        part(seat.id) ? h('span', { class: 'turn-pill' }, part(seat.id)) : null,
+      ),
+      h(
+        'div',
+        { class: 'review-cards' },
+        runs.length === 0 ? h('span', { class: 'muted small' }, 'no cards') : null,
+        runs.map((run) =>
+          h(
+            'span',
+            { class: 'set-run' },
+            run.map((card) => {
+              const chip = cardChip(card);
+              if (marked.has(card)) chip.className += ` ${marked.get(card)}`;
+              return chip;
+            }),
+          ),
+        ),
+      ),
+      h('span', { class: 'review-count muted small' }, cards.length),
+    );
+  };
+  const table = h(
+    'section',
+    { class: 'panel review-table', 'aria-label': 'Every hand at this move' },
+    ['A', 'B'].map((team) =>
+      h(
+        'div',
+        { class: `review-team team-${team}` },
+        h('h2', {}, h('span', { class: 'team-dot' }), TEAM_NAMES[team], h('span', { class: 'review-score' }, frame.score[team]), h('span', { class: 'muted small' }, frame.score[team] === 1 ? 'set' : 'sets')),
+        record.seats.filter((seat) => seat.team === team).map(seatRow),
+      ),
+    ),
+  );
+
+  // ---- stepping through
+  const stepBtn = (label, to, { primary = false, key = null } = {}) =>
+    h('button', { class: cls('btn', primary && 'primary'), disabled: to < 0 || to > moves || to === step, onclick: () => reviewTo(to) }, label, key ? h('span', { class: 'key-hint', 'aria-hidden': 'true' }, key) : null);
+  const stepper = h(
+    'div',
+    { class: 'review-stepper' },
+    stepBtn('First', 0),
+    stepBtn('Back', step - 1, { key: '←' }),
+    stepBtn('Next', step + 1, { primary: true, key: '→' }),
+    stepBtn('Last', moves),
+    h('span', { class: 'review-at' }, step ? `Move ${step} of ${moves}` : `The deal · ${moves} moves`),
+    h('input', { type: 'range', class: 'review-range', min: 0, max: moves, value: step, 'aria-label': 'Move', oninput: (e) => reviewTo(Number(e.target.value)) }),
+  );
+
+  // ---- the whole game as a list
+  const row = (e, i) => {
+    const ok = e.type === 'ask' ? e.success : e.type === 'declare' && e.correct;
+    const about = reviewNote(name, e, analysis.moves[i]);
+    return h(
+      'li',
+      { class: cls(ok ? 'good' : 'bad', e.type === 'declare' && 'declared', step === i + 1 && 'current'), onclick: () => reviewTo(i + 1) },
+      h('span', { class: 'num' }, i + 1),
+      icon(e.type === 'declare' && e.correct ? 'star' : ok ? 'check' : 'cross'),
+      h('span', { class: 'what' }, told(e)),
+      about && about.tone !== 'plain' ? h('span', { class: `tag ${about.tone}` }, about.label) : null,
+    );
+  };
+  const list = h(
+    'aside',
+    { class: 'panel review-moves' },
+    h('h2', {}, 'Moves'),
+    h('ol', { class: 'log-list review-list' }, h('li', { class: cls('deal', step === 0 && 'current'), onclick: () => reviewTo(0) }, h('span', { class: 'num' }), h('span', { class: 'what' }, 'The deal')), record.log.map(row)),
+  );
+
+  // ---- the game in numbers
+  const anyTimeouts = record.seats.some((seat) => analysis.players[seat.id].timeouts);
+  const columns = [
+    ['Questions', 'Questions asked'],
+    ['Got the card', 'Questions that won the card'],
+    ['Sure things', 'Questions where they could be certain the card was there'],
+    ['Couldn’t work', 'Questions where they could have known the card was not there'],
+    ['Cards lost', 'Cards other players took from them'],
+    ['Declared', 'Sets declared correctly'],
+    ['Misdeclared', 'Sets declared wrongly, which went to the other team'],
+    ...(anyTimeouts ? [['Out of time', 'Turns lost on the clock']] : []),
+  ];
+  const totals = h(
+    'section',
+    { class: 'panel history review-totals' },
+    h('h2', {}, 'The game in numbers'),
+    h(
+      'div',
+      { class: 'table-scroll' },
+      h(
+        'table',
+        { class: 'games' },
+        h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Player'), columns.map(([label, title]) => h('th', { scope: 'col', title }, label)))),
+        h(
+          'tbody',
+          {},
+          ['A', 'B'].flatMap((team) =>
+            record.seats
+              .filter((seat) => seat.team === team)
+              .map((seat) => {
+                const t = analysis.players[seat.id];
+                const share = t.asks ? ` (${Math.round((100 * t.hits) / t.asks)}%)` : '';
+                const cells = [t.asks, `${t.hits}${share}`, t.sure, t.dead, t.lost, t.declared, t.misdeclared, ...(anyTimeouts ? [t.timeouts] : [])];
+                return h('tr', {}, h('td', {}, name(seat.id), seat.bot ? tag('bot') : null), cells.map((value) => h('td', { class: cls(value === 0 && 'muted') }, value)));
+              }),
+          ),
+        ),
+      ),
+    ),
+    h('p', { class: 'muted small' }, 'A sure thing is a question whose answer the asker could already work out from their own cards and the questions before it. One that couldn’t work is a question they could have known would fail.'),
+  );
+
+  const { winner, score } = record;
+  const when = new Date(record.endedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const minutes = Math.max(1, Math.round((record.endedAt - record.startedAt) / 60_000));
+  return shell(
+    h(
+      'header',
+      { class: 'review-head' },
+      h('h1', {}, teamName(winner), ` won ${score[winner]}–${score[other(winner)]}`),
+      h('p', { class: 'muted' }, [deckName(record.deck), when, `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`, record.rated ? 'rated' : 'practice'].join(' · ')),
+    ),
+    h('div', { class: 'review-body' }, h('div', { class: 'review-main' }, stepper, moveBox, table), list),
+    totals,
   );
 }
 
@@ -999,8 +1277,14 @@ function helpScreen() {
       ),
       section(
         'Ratings',
-        p('Everyone has an Elo rating that starts at 1000. A game is ', b('rated'), ' when each team has at least one human player and nobody is sitting in two seats; anything else is a practice game.'),
-        p('A team is rated as the average of its players, with bots counted as 1000. Winners take points from losers: 16 between evenly matched teams, more for beating a stronger team, fewer for beating a weaker one. Your profile lists every game you have finished.'),
+        p('Everyone has an Elo rating that starts at 1000. Every game you play is ', b('rated'), ', against people or bots, unless the same player is sitting in two seats.'),
+        p('A team is rated as the average of its players. Winners take points from losers: 16 between evenly matched teams, more for beating a stronger team, fewer for beating a weaker one.'),
+        p('The bots have a rating too. They all play the same way, so they share one: it goes up when they win and down when they lose, and it is what each bot counts as in its team’s average. Bots on both teams cancel out.'),
+      ),
+      section(
+        'Looking back at a game',
+        p('When a game ends, ', b('Review the game'), ' shows it from the deal: every hand, face up, at every move. Step through with the buttons or the arrow keys. Your profile lists every game you have finished, each with its review.'),
+        p('Each move has a note on what its player could have known at the time, from their own cards and the questions asked so far: a ', b('sure thing'), ' when the card was certain to be there, ', b('couldn’t work'), ' when it was known to be elsewhere, and a ', b('guess'), ' otherwise.'),
       ),
     ),
   );
@@ -1185,7 +1469,7 @@ function setupScreen() {
 
 /** One line on whether the game counts for Elo, and if not, why. */
 function ratedNote(unrated) {
-  if (unrated === 'needs-humans') return 'Practice game: ratings only change when each team has at least one human player.';
+  if (unrated === 'no-humans') return 'Practice game: nobody playing has a rating to play for.';
   if (unrated === 'same-player') return 'Practice game: the same player is in more than one seat, so ratings won’t change.';
   return 'Rated game: the result will change the players’ Elo ratings.';
 }
@@ -1414,8 +1698,9 @@ function resultPanel(c) {
           c.g.ratingChanges.map((change) =>
             h(
               'li',
-              { class: cls(`team-${change.team}`, change.you && 'you') },
+              { class: cls(change.team ? `team-${change.team}` : 'no-team', change.you && 'you') },
               h('span', { class: 'who nm' }, change.name),
+              change.bot ? h('span', { class: 'tag', title: 'Every bot plays the same way, so they share one rating' }, 'all bots') : null,
               h('span', { class: cls('delta', change.delta > 0 ? 'up' : 'down') }, change.delta > 0 ? `+${change.delta}` : `−${-change.delta}`),
               h('span', { class: 'after', title: 'New Elo rating' }, change.after),
             ),
@@ -1423,14 +1708,15 @@ function resultPanel(c) {
         )
       : null,
     c.v.unrated ? h('p', { class: 'muted small' }, 'Practice game: ratings are unchanged.') : null,
-    c.isHost
-      ? h(
-          'div',
-          { class: 'result-actions' },
-          h('button', { class: 'btn primary big', onclick: () => send({ t: 'start' }) }, 'Play again'),
-          h('button', { class: 'btn', onclick: () => send({ t: 'toLobby' }) }, 'Back to lobby'),
-        )
-      : h('p', { class: 'muted' }, 'Waiting for the host to start another game…'),
+    h(
+      'div',
+      { class: 'result-actions' },
+      c.isHost ? h('button', { class: 'btn primary big', onclick: () => send({ t: 'start' }) }, 'Play again') : null,
+      // In a new tab, so the room stays open behind it.
+      c.g.reviewId ? h('a', { class: 'btn big', href: `/game/${c.g.reviewId}`, target: '_blank', rel: 'noopener', title: 'Every hand and every move, with notes' }, 'Review the game') : null,
+      c.isHost ? h('button', { class: 'btn', onclick: () => send({ t: 'toLobby' }) }, 'Back to lobby') : null,
+    ),
+    c.isHost ? null : h('p', { class: 'muted' }, 'Waiting for the host to start another game…'),
   );
 }
 
@@ -1751,6 +2037,15 @@ document.addEventListener('keydown', (event) => {
   if (!button) return;
   event.preventDefault();
   button.click();
+});
+// In a review, the arrow keys step through the moves.
+document.addEventListener('keydown', (event) => {
+  if (state.page !== 'review' || !state.review?.record || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.target.closest?.('input, select, textarea')) return;
+  const to = { ArrowLeft: state.reviewStep - 1, ArrowRight: state.reviewStep + 1, Home: 0, End: state.review.record.log.length }[event.key];
+  if (to === undefined) return;
+  event.preventDefault();
+  reviewTo(to);
 });
 // The clock counts down on the page between the server's updates.
 setInterval(tickClock, 200);

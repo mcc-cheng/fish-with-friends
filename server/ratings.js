@@ -3,14 +3,19 @@
 // Fish is a team game, so a team is rated as the average of its players. The
 // winners' expected score comes from the usual Elo curve, and every player on
 // the winning team gains the same number of points that every loser drops.
+//
+// The bots are rated too. They all run the same program, so they share one
+// rating, kept under BOT_ID like any player's.
 
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export const START_RATING = 1000; // also what bots and unidentified players count as
+export const START_RATING = 1000; // also what unidentified players count as
 export const K_FACTOR = 32;
+export const BOT_ID = 'bot'; // never a player's id: those are 24 hex digits
+export const BOT_NAME = 'Bots';
 
 /** The share of wins a side rated `own` is expected to take from a side rated `other`. */
 export function expectedScore(own, other) {
@@ -76,32 +81,53 @@ export class Ratings {
   leaderboard(limit = 20, viewerId = null) {
     return this.ranked()
       .slice(0, limit)
-      .map(([id, { name, rating, games, wins, losses }], i) => ({ rank: i + 1, name, rating, games, wins, losses, you: id === viewerId }));
+      .map(([id, { name, rating, games, wins, losses }], i) => ({
+        rank: i + 1,
+        name,
+        rating,
+        games,
+        wins,
+        losses,
+        you: id === viewerId,
+        ...(id === BOT_ID ? { bot: true } : null),
+      }));
   }
 
   /**
-   * Applies one finished game. `winners` and `losers` list each team's players
-   * as { id, name }; a null id is a bot or a guest, who counts toward the
-   * team's average at the starting rating but has no rating of their own.
-   * Returns the change for every rated player.
+   * Applies one finished game. `winners` and `losers` list each team's seats as
+   * { id, name }: a player's id, BOT_ID for a bot, or null for a guest, who
+   * counts toward the team's average at the starting rating but has no rating
+   * of their own. Returns the change for everyone whose rating moved.
+   *
+   * The bots are one player however many seats they fill, so their rating moves
+   * once: by the full amount when they are all on one team, and by the balance
+   * of their seats when they are on both (nothing at all if it is the same
+   * number each side, since the bots beating the bots says nothing).
    */
   recordGame({ winners, losers }) {
     const average = (team) => team.reduce((sum, player) => sum + (player.id ? this.rating(player.id) : START_RATING), 0) / team.length;
     const gain = winnerGain(average(winners), average(losers));
+    const seats = new Map(); // id -> { name, won, lost }: the seats they filled on each side
+    for (const [team, key] of [[winners, 'won'], [losers, 'lost']]) {
+      for (const player of team) {
+        if (!player.id) continue;
+        if (!seats.has(player.id)) seats.set(player.id, { name: player.id === BOT_ID ? BOT_NAME : player.name, won: 0, lost: 0 });
+        seats.get(player.id)[key] += 1;
+      }
+    }
     const changes = [];
-    const apply = (player, delta, won) => {
-      if (!player.id) return;
-      const record = this.players.get(player.id) ?? { name: player.name, rating: START_RATING, games: 0, wins: 0, losses: 0 };
+    for (const [id, { name, won, lost }] of seats) {
+      if (won === lost) continue;
+      const delta = Math.sign(won - lost) * Math.max(1, Math.round((gain * Math.abs(won - lost)) / (won + lost)));
+      const record = this.players.get(id) ?? { name, rating: START_RATING, games: 0, wins: 0, losses: 0 };
       const before = record.rating;
-      record.name = player.name;
+      record.name = name;
       record.rating = before + delta;
       record.games += 1;
-      record[won ? 'wins' : 'losses'] += 1;
-      this.players.set(player.id, record);
-      changes.push({ id: player.id, name: player.name, before, after: record.rating, delta });
-    };
-    for (const player of winners) apply(player, gain, true);
-    for (const player of losers) apply(player, -gain, false);
+      record[delta > 0 ? 'wins' : 'losses'] += 1;
+      this.players.set(id, record);
+      changes.push({ id, name, before, after: record.rating, delta });
+    }
     this.save();
     return changes;
   }
