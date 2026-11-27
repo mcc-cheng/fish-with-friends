@@ -9,7 +9,7 @@
 //   moves:   one note per move of the record, in order (see noteFor)
 //   players: seat id -> totals for the game (see emptyTotals)
 
-import { deduce } from './bot.js';
+import { deduce } from '../shared/deduce.js';
 import { askableCards, replay } from './game.js';
 
 const emptyTotals = () => ({

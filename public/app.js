@@ -3,6 +3,7 @@
 // rebuilds a DOM tree from `state` and morph() patches the live page to match.
 
 import { buildSets, cardInfo, setIdOf, sortCards } from '/shared/cards.js';
+import { deduce } from '/shared/deduce.js';
 
 const TEAM_NAMES = { A: 'Orange', B: 'Purple' };
 const other = (team) => (team === 'A' ? 'B' : 'A');
@@ -143,6 +144,68 @@ function themeButton() {
   );
 }
 
+// ---------------------------------------------------------------- sound
+// Two short tones, made here so there is no file to fetch: one when the turn
+// comes to you, one when your clock is nearly out. A browser only lets a page
+// make sound once it has been clicked or typed in, so the first of either in a
+// game wakes the audio up.
+
+const SOUNDS = {
+  turn: [[659, 0.16], [880, 0.3]], // each note is [pitch in Hz, length in seconds]
+  hurry: [[440, 0.11], [440, 0.11]],
+};
+let sound = load(localStorage, 'fish:sound') !== 'off';
+let audio = null;
+
+function wakeAudio() {
+  if (!sound || !state.code) return;
+  try {
+    audio ??= new (window.AudioContext ?? window.webkitAudioContext)();
+    if (audio.state !== 'running') audio.resume().catch(() => {});
+  } catch {
+    // No sound in this browser; everything else works without it.
+  }
+}
+
+function play(notes) {
+  if (!sound || audio?.state !== 'running') return;
+  let at = audio.currentTime + 0.02;
+  for (const [pitch, length] of notes) {
+    const tone = audio.createOscillator();
+    const volume = audio.createGain();
+    tone.frequency.value = pitch;
+    volume.gain.setValueAtTime(0.0001, at);
+    volume.gain.exponentialRampToValueAtTime(0.14, at + 0.015);
+    volume.gain.exponentialRampToValueAtTime(0.0001, at + length);
+    tone.connect(volume).connect(audio.destination);
+    tone.start(at);
+    tone.stop(at + length + 0.02);
+    at += length * 0.75;
+  }
+}
+
+function soundButton() {
+  const label = sound ? 'Turn the sounds off' : 'Turn the sounds on';
+  return h(
+    'button',
+    {
+      class: 'icon-btn',
+      title: `${label}: a tone when it is your turn, and when your clock is nearly out`,
+      'aria-label': label,
+      'aria-pressed': String(sound),
+      onclick: () => {
+        sound = !sound;
+        save(localStorage, 'fish:sound', sound ? null : 'off');
+        // Switching them on plays one, so you know what to listen for.
+        wakeAudio();
+        if (sound) audio?.resume().then(() => play(SOUNDS.turn), () => {});
+        render();
+      },
+    },
+    icon(sound ? 'sound' : 'mute'),
+  );
+}
+
 // ---------------------------------------------------------------- state
 
 // Room codes have no vowels, so a page like "/help" is never mistaken for one.
@@ -158,12 +221,19 @@ const state = {
   reviewId: location.pathname.match(REVIEW_PATH)?.[1] ?? null,
   review: null, // { id, record, analysis, frames } once it arrives, or { id, missing: true }
   reviewStep: 0, // 0 is the deal; k is the position in which move k was made
+  reviewSeat: null, // the seat whose view of the game is shown, or null for every hand face up
+  reviewTruth: false, // in a seat's view: also show where the cards they couldn't place really were
   name: playerName(),
   busy: false,
   lobby: null, // { games, yours, online, played }: what the lobby lists
   lobbyTab: 'games', // games | yours | top
   chat: [], // lobby chat messages
   chatDraft: '',
+  roomChat: [], // what has been said in the room we are in
+  chatUnread: 0, // ...and how much of it arrived while the game log was showing
+  sideTab: 'log', // beside the game: log | chat
+  linkCode: null, // { code, minutes }: a code for using this profile on another device
+  linkDraft: '',
   profile: null, // { me, stats, games }: this player's record, once asked for
   nameDraft: null, // the name being edited on the profile page
   codeDraft: '',
@@ -223,6 +293,7 @@ function receive(msg) {
   switch (msg.t) {
     case 'joined':
       state.code = msg.code;
+      state.roomChat = msg.chat ?? [];
       save(sessionStorage, sessionKey(msg.code), JSON.stringify({ token: msg.token }));
       if (location.pathname !== `/${msg.code}`) history.pushState(null, '', `/${msg.code}`);
       break;
@@ -230,6 +301,9 @@ function receive(msg) {
       // Anything in the new hand that wasn't in the old one was just dealt or won.
       const before = state.view ? (state.view.game?.hand ?? []) : null;
       state.fresh = new Set(before && msg.game ? msg.game.hand.filter((card) => !before.includes(card)) : []);
+      const myTurn = (view) => view?.phase === 'playing' && view.game.turn === view.you;
+      if (myTurn(msg) && !myTurn(state.view)) play(SOUNDS.turn);
+      if (!msg.game) state.chatUnread = 0; // between games the chat is in full view
       state.view = msg;
       state.clockAt = performance.now();
       state.stale = Boolean(msg.stale);
@@ -247,11 +321,35 @@ function receive(msg) {
       if (msg.chat) state.chat = msg.chat;
       break;
     case 'chat':
-      state.chat = [...state.chat, msg.message].slice(-200);
+      if (!msg.room) state.chat = [...state.chat, msg.message].slice(-200);
+      else if (msg.room === state.code) {
+        state.roomChat = [...state.roomChat, msg.message].slice(-200);
+        // In a game the chat shares its panel with the log: count what arrives while the log is showing.
+        if (state.view?.game && state.sideTab !== 'chat') {
+          state.chatUnread += 1;
+          // On a phone that count is far down the page, so what was said is shown where it will be seen.
+          const tabs = document.querySelector('.log-tabs')?.getBoundingClientRect();
+          if (!tabs || tabs.top >= innerHeight || tabs.bottom <= 0) toast(`${msg.message.name}: ${msg.message.text}`.slice(0, 120));
+        }
+      }
       break;
     case 'profile':
       state.profile = { me: msg.me, stats: msg.stats, games: msg.games };
       break;
+    case 'linkCode':
+      state.linkCode = { code: msg.code, minutes: msg.minutes };
+      break;
+    case 'linked':
+      // The other device's key becomes this browser's: from the next load on, it is the same player.
+      save(localStorage, 'fish:player', msg.player);
+      if (load(localStorage, 'fish:player') !== msg.player) {
+        toast('This browser is blocking storage, so it can’t keep the profile.', 'bad');
+        break;
+      }
+      if (msg.name) save(localStorage, 'fish:name', msg.name);
+      save(sessionStorage, 'fish:linked', '1');
+      location.reload();
+      return;
     case 'review':
       if (msg.id !== state.reviewId) break;
       state.review = msg.missing ? { id: msg.id, missing: true } : { id: msg.id, record: msg.record, analysis: msg.analysis, frames: reviewFrames(msg.record) };
@@ -283,7 +381,7 @@ function receive(msg) {
 
 function exitRoom() {
   if (state.code) save(sessionStorage, sessionKey(state.code), null);
-  Object.assign(state, { view: null, code: null, busy: false, page: 'lobby' });
+  Object.assign(state, { view: null, code: null, busy: false, page: 'lobby', roomChat: [], chatUnread: 0, sideTab: 'log', chatDraft: '' });
   resetMoves();
   if (location.pathname !== '/') history.replaceState(null, '', '/');
   // Back in the lobby: ask for it afresh, since nothing about it was sent while we were in a room.
@@ -341,6 +439,17 @@ function saveName(event) {
   save(localStorage, 'fish:name', name);
   send({ t: 'hello', player: PLAYER, name }); // so the chat and new games use it straight away
   toast('Name saved.');
+}
+
+/** Asks to switch this browser to the profile a code from another device stands for. */
+function useLinkCode(event) {
+  event.preventDefault();
+  const code = state.linkDraft.replace(/[^a-z0-9]/gi, '');
+  if (code.length !== 8) return toast('A code is eight letters and numbers.', 'bad');
+  const games = state.profile?.stats?.games ?? 0;
+  const left = games ? ` The ${games === 1 ? 'game' : `${games} games`} played from this browser will stay with its old profile, which it will stop using.` : '';
+  if (!confirm(`Switch this browser to the profile that code came from?${left}`)) return;
+  if (send({ t: 'linkUse', code })) state.linkDraft = '';
 }
 
 function leaveRoom() {
@@ -606,9 +715,17 @@ function clockEl({ brief = false } = {}) {
   );
 }
 
+let hurried = null; // the move and part of the clock the warning tone last sounded for
+
 function tickClock() {
   const now = clockNow();
   if (!now) return;
+  // One warning as your own time runs low: for the move (unless it was short to begin with), and again for the time bank.
+  if (now.low && now.player === state.view.you && (now.onBank || state.view.settings.moveTime > 10)) {
+    const key = `${state.view.code}:${state.view.game.position}:${now.onBank}`;
+    if (key !== hurried) play(SOUNDS.hurry);
+    hurried = key;
+  }
   for (const el of document.querySelectorAll('.clock')) {
     el.classList.toggle('on-bank', now.onBank);
     el.classList.toggle('low', now.low);
@@ -666,6 +783,7 @@ function topbar() {
     v ? h('button', { class: 'btn quiet', onclick: leaveRoom }, 'Leave') : null,
     h('a', { class: 'me', href: '/profile', title: 'Your profile: your games and statistics', ...away }, state.name),
     h('a', { class: 'icon-btn', href: '/help', title: 'Help: how to play', 'aria-label': 'Help: how to play', ...away }, '?'),
+    v ? soundButton() : null,
     themeButton(),
   );
 }
@@ -794,15 +912,17 @@ function gamesTable(games, tab) {
   );
 }
 
-function chatPanel() {
-  return h(
-    'section',
-    { class: 'panel chat' },
-    h('h2', {}, 'Lobby chat'),
+/**
+ * A chat's messages and the box for adding to it. In the lobby a speaker has a
+ * colour of their own; in a room they have their team's.
+ */
+function chatBox(messages) {
+  const speaker = (m) => (m.hue == null ? h('span', { class: cls('who', m.team && `team-${m.team}`) }, m.name) : coloured(m.name, m.hue));
+  return [
     h(
       'ol',
       { class: 'chat-list', 'aria-live': 'polite' },
-      state.chat.length === 0 ? h('li', { class: 'muted' }, 'Nobody has said anything yet.') : state.chat.map((m) => h('li', {}, coloured(m.name, m.hue), ': ', m.text)),
+      messages.length === 0 ? h('li', { class: 'muted' }, 'Nobody has said anything yet.') : messages.map((m) => h('li', {}, speaker(m), ': ', m.text)),
     ),
     h(
       'form',
@@ -820,7 +940,11 @@ function chatPanel() {
         },
       }),
     ),
-  );
+  ];
+}
+
+function chatPanel() {
+  return h('section', { class: 'panel chat' }, h('h2', {}, 'Lobby chat'), chatBox(state.chat));
 }
 
 function leaderboard() {
@@ -886,7 +1010,7 @@ function profileScreen() {
         h('button', { class: 'btn', type: 'submit' }, 'Save'),
       ),
       PLAYER
-        ? h('p', { class: 'muted small' }, 'Your games and rating are kept for this browser. Clearing its site data, or playing from another browser, starts a new record.')
+        ? h('p', { class: 'muted small' }, 'Your games and rating are kept for this browser. Clearing its site data, or playing from another browser, starts a new record, unless you bring this one across with a code (below).')
         : h('p', { class: 'muted small' }, 'This browser is blocking storage, so it can’t be recognised from one visit to the next and no record is kept.'),
       profile
         ? h(
@@ -943,6 +1067,43 @@ function profileScreen() {
                 ),
           )
         : null,
+      PLAYER ? linkPanel() : null,
+    ),
+  );
+}
+
+/** Taking this profile to another device, or bringing one here: a code made on one, typed in on the other. */
+function linkPanel() {
+  const made = state.linkCode;
+  return h(
+    'section',
+    { class: 'panel link-panel' },
+    h('h2', {}, 'Another device'),
+    h('p', { class: 'muted small' }, 'To play as yourself on another phone or computer, get a code here and type it in on that device’s profile page. Both will then share this name, rating and list of games.'),
+    h(
+      'div',
+      { class: 'link-row' },
+      h('button', { class: 'btn', onclick: () => send({ t: 'linkCode', player: PLAYER, name: state.name }) }, made ? 'Get a new code' : 'Get a code'),
+      made ? h('strong', { class: 'code link-code' }, `${made.code.slice(0, 4)} ${made.code.slice(4)}`) : null,
+      made ? h('span', { class: 'muted small' }, `Works once, within ${made.minutes} minutes.`) : null,
+    ),
+    h(
+      'form',
+      { class: 'link-row', onsubmit: useLinkCode },
+      h('input', {
+        type: 'text',
+        maxlength: 12,
+        autocomplete: 'off',
+        autocapitalize: 'characters',
+        spellcheck: 'false',
+        'aria-label': 'Code from your other device',
+        placeholder: 'Code from your other device',
+        value: state.linkDraft,
+        oninput: (e) => {
+          state.linkDraft = e.target.value;
+        },
+      }),
+      h('button', { class: 'btn', type: 'submit' }, 'Use this code'),
     ),
   );
 }
@@ -973,6 +1134,24 @@ function reviewFrames(record) {
   }
   frames.push(snap());
   return frames;
+}
+
+/**
+ * What the player in `seatId` could be sure of when move `step` was about to be
+ * made: `holder`, `lacks` and `active` as deduce() gives them, from that
+ * player's own cards and the questions asked before it.
+ */
+function reviewKnowledge({ record, frames }, step, seatId) {
+  const before = Math.max(0, step - 1); // the position shown at a step is the one its move was made in
+  const log = record.log.slice(0, before);
+  const claimed = new Map(log.filter((event) => event.type === 'declare').map((event) => [event.set, event.team]));
+  const game = {
+    seats: record.seats,
+    sets: buildSets(record.deck).map((set) => ({ ...set, claimedBy: claimed.get(set.id) ?? null })),
+    hands: new Map([...frames[before].hands].map(([id, cards]) => [id, new Set(cards)])),
+    log,
+  };
+  return { ...deduce(game, seatId), claimed };
 }
 
 function reviewTo(step) {
@@ -1025,6 +1204,10 @@ function reviewScreen() {
   const name = (id) => h('span', { class: `who team-${seatOf.get(id).team}` }, seatOf.get(id).name);
   const teamName = (team) => h('span', { class: `who team-${team}` }, TEAM_NAMES[team]);
   const setOf = (id) => sets.find((set) => set.id === id);
+  const bySide = ['A', 'B'].flatMap((team) => record.seats.filter((seat) => seat.team === team));
+  // Whose eyes the table is seen through: nobody's (every hand face up), or one player's.
+  const viewer = seatOf.has(state.reviewSeat) ? state.reviewSeat : null;
+  const known = viewer ? reviewKnowledge(review, step, viewer) : null;
 
   /** A move in a few words, as in the game's log. */
   const told = (e) => {
@@ -1070,10 +1253,15 @@ function reviewScreen() {
   };
   const seatRow = (seat) => {
     const cards = frame.hands.get(seat.id);
-    const runs = sets.map((set) => cards.filter((card) => set.cards.includes(card))).filter((run) => run.length);
+    // From one player's seat, a hand is the cards they could place in it. The rest
+    // are a number, unless the real cards have been asked for: then they are shown faintly.
+    const placed = (card) => !known || known.holder.get(card) === seat.id;
+    const shown = state.reviewTruth ? cards : cards.filter(placed);
+    const unknown = cards.length - shown.length;
+    const runs = sets.map((set) => shown.filter((card) => set.cards.includes(card))).filter((run) => run.length);
     return h(
       'div',
-      { class: cls('review-seat', `team-${seat.team}`, part(seat.id) && 'acting') },
+      { class: cls('review-seat', `team-${seat.team}`, part(seat.id) && 'acting', seat.id === viewer && 'self') },
       h(
         'div',
         { class: 'review-who' },
@@ -1084,7 +1272,7 @@ function reviewScreen() {
       h(
         'div',
         { class: 'review-cards' },
-        runs.length === 0 ? h('span', { class: 'muted small' }, 'no cards') : null,
+        cards.length === 0 ? h('span', { class: 'muted small' }, 'no cards') : null,
         runs.map((run) =>
           h(
             'span',
@@ -1092,17 +1280,120 @@ function reviewScreen() {
             run.map((card) => {
               const chip = cardChip(card);
               if (marked.has(card)) chip.className += ` ${marked.get(card)}`;
+              if (!placed(card)) chip.className += ' unplaced';
               return chip;
             }),
           ),
         ),
+        unknown ? h('span', { class: 'muted small' }, shown.length ? `and ${unknown} unknown` : `${unknown} unknown`) : null,
       ),
       h('span', { class: 'review-count muted small' }, cards.length),
     );
   };
+
+  // ---- one player's view: for every card still in play, who has it, who can't, and who might
+  const seenBy = (id, label, team) =>
+    h(
+      'button',
+      {
+        class: cls('pill', team && `team-${team}`),
+        'aria-pressed': String(viewer === id),
+        onclick: () => {
+          state.reviewSeat = id;
+          render();
+        },
+      },
+      label,
+    );
+  const picker = h(
+    'div',
+    { class: 'review-seen', role: 'group', 'aria-label': 'Whose view of the game' },
+    h('span', { class: 'step-label' }, 'Seen by'),
+    seenBy(null, 'Everyone'),
+    bySide.map((seat) => seenBy(seat.id, seat.name, seat.team)),
+  );
+  // A column is narrow, so a joker is headed "Jo" there.
+  const columnChip = (card) => {
+    const info = cardInfo(card);
+    return h('span', { class: `chip suit-${info.tint}`, role: 'img', 'aria-label': info.name, title: info.name }, info.joker ? 'Jo' : info.rank, pip(info.suit));
+  };
+  const knowSet = (set) => {
+    const won = known.claimed.get(set.id);
+    const cell = (seat, card) => {
+      const holds = frame.hands.get(seat.id);
+      const sure = known.holder.get(card);
+      const status = sure === seat.id ? 'has' : sure !== undefined || holds.length === 0 || known.lacks.get(card)?.has(seat.id) ? 'no' : 'maybe';
+      const words = { has: 'has', no: 'can’t have', maybe: 'might have' }[status];
+      const real = state.reviewTruth && status === 'maybe' && holds.includes(card);
+      const asked = event?.type === 'ask' && event.card === card && event.target === seat.id;
+      return h(
+        'td',
+        { class: cls(asked && 'hot'), title: `${seat.name} ${words} the ${cardInfo(card).name}${real ? ', and did' : ''}` },
+        h('span', { class: cls('know', status, status === 'no' && 'icon icon-cross', real && 'real') }),
+        h('span', { class: 'sr-only' }, words, real ? ' (really had it)' : null),
+      );
+    };
+    const row = (seat) => {
+      // Asking for a card of a set shows you hold one of it, for as long as none is taken from you.
+      const some = seat.id !== viewer && known.active.get(seat.id)?.has(set.id) && !set.cards.some((card) => known.holder.get(card) === seat.id);
+      return h(
+        'tr',
+        { class: cls(`team-${seat.team}`, seat.id === viewer && 'self', frame.hands.get(seat.id).length === 0 && 'out') },
+        h(
+          'th',
+          { scope: 'row' },
+          h('span', { class: 'know-who' }, h('span', { class: 'nm', title: seat.name }, seat.name), some ? h('span', { class: 'know-some', title: `${seat.name} has asked for a card of this set, so holds at least one of them` }, '1+') : null),
+        ),
+        set.cards.map((card) => cell(seat, card)),
+      );
+    };
+    return h(
+      'table',
+      { class: cls('know-set', won && 'won', event?.type === 'declare' && event.set === set.id && 'hot') },
+      h('caption', {}, set.suit ? pip(set.suit, { tinted: true }) : null, ' ', set.name, won ? h('span', { class: 'muted' }, ` · won by ${TEAM_NAMES[won]}`) : null),
+      h('thead', {}, h('tr', {}, h('th', {}), set.cards.map((card) => h('th', { scope: 'col', class: cls(event?.type === 'ask' && event.card === card && 'hot') }, columnChip(card))))),
+      won ? null : h('tbody', {}, bySide.map(row)),
+    );
+  };
+  const knowledge = known
+    ? h(
+        'section',
+        { class: 'panel review-know', style: `--n: ${sets[0].cards.length}`, 'aria-label': `What ${seatOf.get(viewer).name} could know` },
+        h(
+          'div',
+          { class: 'know-head' },
+          h('h2', {}, 'What ', name(viewer), ' could know'),
+          h(
+            'label',
+            { class: 'know-truth' },
+            h('input', {
+              type: 'checkbox',
+              checked: state.reviewTruth,
+              onchange: (e) => {
+                state.reviewTruth = e.target.checked;
+                render();
+              },
+            }),
+            'Show where the cards really were',
+          ),
+        ),
+        h('div', { class: 'know-sets' }, sets.map(knowSet)),
+        h(
+          'p',
+          { class: 'know-key muted small' },
+          h('span', {}, h('span', { class: 'know has' }), ' has it'),
+          h('span', {}, h('span', { class: 'know no icon icon-cross' }), ' can’t have it'),
+          h('span', {}, h('span', { class: 'know maybe' }), ' might have it'),
+          h('span', {}, h('span', { class: 'know-some' }, '1+'), ' holds at least one card of the set'),
+          state.reviewTruth ? h('span', {}, h('span', { class: 'know maybe real' }), ' really had it') : null,
+        ),
+        h('p', { class: 'muted small' }, 'Worked out from their own cards and the questions asked before this move. It follows who was asked for what; it does not count cards.'),
+      )
+    : null;
+
   const table = h(
     'section',
-    { class: 'panel review-table', 'aria-label': 'Every hand at this move' },
+    { class: 'panel review-table', 'aria-label': viewer ? `The table as ${seatOf.get(viewer).name} saw it` : 'Every hand at this move' },
     ['A', 'B'].map((team) =>
       h(
         'div',
@@ -1199,7 +1490,7 @@ function reviewScreen() {
       h('h1', {}, teamName(winner), ` won ${score[winner]}–${score[other(winner)]}`),
       h('p', { class: 'muted' }, [deckName(record.deck), when, `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`, record.rated ? 'rated' : 'practice'].join(' · ')),
     ),
-    h('div', { class: 'review-body' }, h('div', { class: 'review-main' }, stepper, moveBox, table), list),
+    h('div', { class: 'review-body' }, h('div', { class: 'review-main' }, stepper, moveBox, picker, table, knowledge), list),
     totals,
   );
 }
@@ -1274,17 +1565,21 @@ function helpScreen() {
         'Games, bots and seats',
         p('A public game is listed in the lobby for anyone to join. A private game is reached only by its link or four-letter code. Teams need the same number of players, and bots can fill empty seats.'),
         p('If you lose your connection or close the tab, your seat is kept: opening the game again from the same browser puts you back in it. If someone has gone for good, the host can let a bot play their cards, or a spectator can take the seat over.'),
+        p('Every game has a ', b('chat'), ' of its own, for the people in it: beside the teams before the game, and on a tab next to the game log once it starts.'),
+        p('A short ', b('tone'), ' plays when the turn comes to you, and another when your clock is nearly out. The speaker button in the top bar switches them off.'),
       ),
       section(
         'Ratings',
         p('Everyone has an Elo rating that starts at 1000. Every game you play is ', b('rated'), ', against people or bots, unless the same player is sitting in two seats.'),
         p('A team is rated as the average of its players. Winners take points from losers: 16 between evenly matched teams, more for beating a stronger team, fewer for beating a weaker one.'),
         p('The bots have a rating too. They all play the same way, so they share one: it goes up when they win and down when they lose, and it is what each bot counts as in its team’s average. Bots on both teams cancel out.'),
+        p('Your rating and your games belong to the browser you play in. To play as yourself on ', b('another device'), ', get a code on your profile page and type it in on the other device’s profile page.'),
       ),
       section(
         'Looking back at a game',
         p('When a game ends, ', b('Review the game'), ' shows it from the deal: every hand, face up, at every move. Step through with the buttons or the arrow keys. Your profile lists every game you have finished, each with its review.'),
         p('Each move has a note on what its player could have known at the time, from their own cards and the questions asked so far: a ', b('sure thing'), ' when the card was certain to be there, ', b('couldn’t work'), ' when it was known to be elsewhere, and a ', b('guess'), ' otherwise.'),
+        p('Under ', b('Seen by'), ', pick a player to see the game from their seat: only the cards they could place, and for every set a grid of who has each card, who can’t have it and who might. Tick the box above the grid to see where the cards they couldn’t place really were.'),
       ),
     ),
   );
@@ -1450,6 +1745,7 @@ function setupScreen() {
         watchers.length ? ['Watching: ', watchers.map((m) => m.name + (m.id === v.you ? ' (you)' : '')).join(', '), '. '] : null,
         me.team ? h('button', { class: 'link', onclick: () => send({ t: 'team', team: null }) }, 'Just watch instead') : 'Pick a team to play.',
       ),
+      h('section', { class: 'panel chat room-chat' }, h('h2', {}, 'Chat'), chatBox(state.roomChat)),
       settings,
       h(
         'section',
@@ -2016,13 +2312,35 @@ function logPanel(c) {
       ),
     );
   };
+  // The log shares its panel with the room's chat: one or the other, by the tabs along the top.
+  const chatting = state.sideTab === 'chat';
+  const tab = (id, label, count) =>
+    h(
+      'button',
+      {
+        class: 'tab',
+        role: 'tab',
+        'aria-selected': String(state.sideTab === id),
+        onclick: () => {
+          state.sideTab = id;
+          state.chatUnread = 0;
+          render();
+        },
+      },
+      label,
+      count ? h('span', { class: 'tab-count', title: `${count} new` }, count) : null,
+    );
   return h(
     'section',
-    { class: 'log panel', 'aria-label': 'Game log' },
-    h('h2', {}, lastOnly ? 'Last question' : 'Game log'),
-    lastOnly ? h('p', { class: 'muted small' }, 'This room only shows the latest question. Remember the rest!') : null,
-    g.log.length === 0 ? h('p', { class: 'muted small' }, 'Nothing has happened yet.') : null,
-    h('ol', { class: 'log-list' }, [...g.log].reverse().map(entry)),
+    { class: cls('log panel', chatting && 'chatting'), 'aria-label': chatting ? 'Chat' : 'Game log' },
+    h('div', { class: 'tabs log-tabs', role: 'tablist' }, tab('log', lastOnly ? 'Last question' : 'Game log'), tab('chat', 'Chat', state.chatUnread)),
+    chatting
+      ? chatBox(state.roomChat)
+      : [
+          lastOnly ? h('p', { class: 'muted small' }, 'This room only shows the latest question. Remember the rest!') : null,
+          g.log.length === 0 ? h('p', { class: 'muted small' }, 'Nothing has happened yet.') : null,
+          h('ol', { class: 'log-list' }, [...g.log].reverse().map(entry)),
+        ],
   );
 }
 
@@ -2049,6 +2367,8 @@ document.addEventListener('keydown', (event) => {
 });
 // The clock counts down on the page between the server's updates.
 setInterval(tickClock, 200);
+// Sound has to be started from a click or a key press (see wakeAudio).
+for (const type of ['pointerdown', 'keydown']) document.addEventListener(type, wakeAudio, { capture: true, passive: true });
 // Follow the system's light/dark setting until the player picks a theme themselves.
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
   if (load(localStorage, 'fish:theme')) return;
@@ -2062,3 +2382,7 @@ setInterval(() => {
 applyTheme(currentTheme());
 render();
 connect();
+if (load(sessionStorage, 'fish:linked')) {
+  save(sessionStorage, 'fish:linked', null);
+  toast('This browser now plays as the profile from your other device.');
+}

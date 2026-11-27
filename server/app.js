@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws';
 import { History } from './history.js';
 import { Ratings } from './ratings.js';
 import { Rooms } from './rooms.js';
+import { RoomStore } from './store.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -73,7 +74,8 @@ async function serveStatic(req, res) {
 /**
  * @param {object} options  Options for Rooms, plus:
  *   `dataDir`: a folder for what should outlive a restart: Elo ratings (ratings.json),
- *     the list of finished games (games.jsonl) and the full record of each (games/<id>.json).
+ *     the list of finished games (games.jsonl), the full record of each (games/<id>.json),
+ *     and the rooms open right now, with any game in progress (rooms/<CODE>.json).
  *     Without it they last only as long as the process.
  *   `messagesPer10s`: how many messages one connection may send in ten seconds.
  *     Stepping through bot moves takes one per move, so it has to leave room for quick clicking.
@@ -82,6 +84,7 @@ export function createApp({ dataDir = null, messagesPer10s = 200, ...options } =
   const rooms = new Rooms({
     ratings: new Ratings({ file: dataDir && path.join(dataDir, 'ratings.json') }),
     history: new History({ file: dataDir && path.join(dataDir, 'games.jsonl') }),
+    store: dataDir ? new RoomStore({ dir: path.join(dataDir, 'rooms') }) : null,
     stale: codeIsStale,
     ...options,
   });
@@ -134,11 +137,12 @@ export function createApp({ dataDir = null, messagesPer10s = 200, ...options } =
     server,
     rooms,
     listen: (port, host) => new Promise((resolve) => server.listen(port, host, () => resolve(server.address().port))),
-    close: () =>
-      new Promise((resolve) => {
-        rooms.close();
-        for (const ws of wss.clients) ws.terminate();
-        wss.close(() => server.close(() => resolve()));
-      }),
+    /** Stops the server once everything it had to save is on disk. */
+    close: async () => {
+      rooms.close();
+      await rooms.saved();
+      for (const ws of wss.clients) ws.terminate();
+      await new Promise((resolve) => wss.close(() => server.close(() => resolve())));
+    },
   };
 }

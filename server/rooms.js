@@ -4,11 +4,11 @@
 // supplies real ones and sets nothing else on them. This module adds
 // conn.room and conn.member once the connection has joined a room.
 
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { sortCards } from '../shared/cards.js';
 import { analyse } from './analysis.js';
 import { chooseMove } from './bot.js';
-import { ask, canDeclare, createGame, declare, DECLARE_RULES, otherTeam, recordOf, shuffle, timeout } from './game.js';
+import { ask, canDeclare, createGame, declare, DECLARE_RULES, otherTeam, recordOf, replay, shuffle, timeout } from './game.js';
 import { History } from './history.js';
 import { BOT_ID, Ratings, playerId } from './ratings.js';
 
@@ -17,11 +17,15 @@ export const TEAM_MAX = 4;
 const ROOM_MAX = 16; // players plus spectators
 const LOG_MAX = 300; // events sent to clients
 const LOBBY_GAMES_MAX = 50; // rooms listed in the lobby
-const CHAT_MAX = 100; // lobby chat messages kept for people who arrive later
+const CHAT_MAX = 100; // chat messages kept for people who arrive later: in the lobby, and in each room
 const CHAT_LENGTH = 240;
 const CHAT_GAP_MS = 700; // the least time between one person's messages
 const REVIEWS_KEPT = 30; // analysed games held ready, for the several players who open the same one
 const CODE_LETTERS = 'BCDFGHJKLMNPQRSTVWXZ'; // no vowels, so codes never spell words
+const ROOM_CODE = new RegExp(`^[${CODE_LETTERS}]{4}$`);
+const LINK_SYMBOLS = `${CODE_LETTERS}23456789`; // for the codes that carry a profile to another device
+const LINK_LENGTH = 8;
+const LINKS_MAX = 1000; // codes waiting to be used, over everyone
 const BOT_NAMES = ['Guppy', 'Minnow', 'Tetra', 'Koi', 'Pike', 'Trout', 'Perch', 'Bass'];
 // The first value of each setting is its default.
 const SETTING_VALUES = {
@@ -68,6 +72,10 @@ export class Rooms {
     this.chat = []; // recent lobby chat
     this.chatSeq = 0;
     this.reviews = new Map(); // game id -> the answer to 'review', for the games asked about lately
+    this.links = new Map(); // code -> { secret, pid, name, expires }: profiles on their way to another device
+    this.store = options.store ?? null; // where rooms are kept across a restart, if anywhere
+    this.unsaved = new Set(); // codes of the rooms that have changed since they were last saved
+    this.saveTimer = null;
     this.lobbyTimer = null;
     this.options = {
       botDelay: [1200, 2200], // ms a bot "thinks" before moving: [min, max]
@@ -75,11 +83,22 @@ export class Rooms {
       emptyTtlMs: 20 * 60_000, // how long a room with nobody connected survives
       lobbyDelayMs: 150, // lobby updates are batched over this long
       secondMs: 1000, // how long a second of the move clock lasts (tests run it fast)
+      saveDelayMs: 250, // a room that changes is written to disk this long after, so a burst of changes is one write
+      linkTtlMs: 10 * 60_000, // how long a code for moving a profile to another device lasts
+      linkTries: 5, // wrong codes one connection may try in a minute
       stale: () => false, // whether newer server code is waiting on disk for a restart
       maxRooms: 1000,
       rng: Math.random,
       ...options,
     };
+    // Carry on with the rooms the last process left behind.
+    for (const saved of this.store?.load() ?? []) {
+      try {
+        this.restore(saved);
+      } catch (error) {
+        console.error(`Could not bring back room ${saved?.code}`, error);
+      }
+    }
   }
 
   // ---- entry points used by the transport ----
@@ -102,6 +121,8 @@ export class Rooms {
       return conn.send({ t: 'profile', me: conn.pid ? this.ratings.profile(conn.pid) : null, ...mine });
     }
     if (msg.t === 'review') return this.review(conn, msg);
+    if (msg.t === 'linkCode') return this.linkCode(conn, msg);
+    if (msg.t === 'linkUse') return this.linkUse(conn, msg);
     if (msg.t === 'create') return this.create(conn, msg);
     if (msg.t === 'join') return this.join(conn, msg);
     const { room, member } = conn;
@@ -118,9 +139,13 @@ export class Rooms {
     this.touchLobby();
   }
 
+  /** Stops everything, leaving the rooms on disk (if they are kept there) for the next process to carry on. */
   close() {
-    for (const room of [...this.rooms.values()]) this.destroy(room);
+    this.flush();
+    for (const room of this.rooms.values()) this.release(room);
+    this.rooms.clear();
     clearTimeout(this.lobbyTimer);
+    this.lobbyTimer = null;
   }
 
   // ---- the lobby: the list of games, who is around, and a chat ----
@@ -167,13 +192,22 @@ export class Rooms {
     }, this.options.lobbyDelayMs);
   }
 
+  /** A chat message: to the lobby from someone in the lobby, or to a room from someone in it. */
   say(conn, msg) {
-    if (conn.room) return conn.send({ t: 'error', message: 'The chat is in the lobby.' });
     const text = String(msg.text ?? '').replace(/\s+/g, ' ').trim().slice(0, CHAT_LENGTH);
     if (!text) return;
     const now = Date.now();
     if (now - (conn.lastChat ?? 0) < CHAT_GAP_MS) return conn.send({ t: 'error', message: 'One message at a time. Give it a second.' });
     conn.lastChat = now;
+    const { room, member } = conn;
+    if (room) {
+      // In a room the speaker is known by their seat: their name there, and their team's colour.
+      const message = { id: ++room.chatSeq, name: member.name, team: member.team, text, at: now };
+      room.chat.push(message);
+      if (room.chat.length > CHAT_MAX) room.chat.shift();
+      for (const other of room.members.values()) other.conn?.send({ t: 'chat', room: room.code, message });
+      return this.persist(room);
+    }
     const message = { id: ++this.chatSeq, name: conn.name ?? 'Guest', hue: hueOf(conn.pid ?? `guest${this.chatSeq}`), text, at: now };
     this.chat.push(message);
     if (this.chat.length > CHAT_MAX) this.chat.shift();
@@ -202,6 +236,45 @@ export class Rooms {
     }
   }
 
+  // ---- taking a profile to another device ----
+  //
+  // A player is whoever holds their browser's secret, so using the same profile
+  // on a second device means giving it the secret. The first device asks for a
+  // short code, the second types it in and is sent the secret. The secret waits
+  // here in memory, never on disk; the code works once and soon runs out.
+
+  linkCode(conn, msg) {
+    if (!conn.pid || playerId(msg.player) !== conn.pid) {
+      return conn.send({ t: 'error', message: 'This browser has no profile to share: it is blocking storage.' });
+    }
+    const now = Date.now();
+    for (const [code, link] of this.links) if (link.expires <= now || link.pid === conn.pid) this.links.delete(code); // one code a player at a time
+    if (this.links.size >= LINKS_MAX) return conn.send({ t: 'error', message: 'Too many codes are waiting to be used. Try again in a few minutes.' });
+    let code;
+    do {
+      code = Array.from({ length: LINK_LENGTH }, () => LINK_SYMBOLS[randomInt(LINK_SYMBOLS.length)]).join('');
+    } while (this.links.has(code));
+    this.links.set(code, { secret: msg.player, pid: conn.pid, name: conn.name ?? null, expires: now + this.options.linkTtlMs });
+    conn.send({ t: 'linkCode', code, minutes: Math.max(1, Math.round(this.options.linkTtlMs / 60_000)) });
+  }
+
+  linkUse(conn, msg) {
+    const now = Date.now();
+    conn.linkMisses = (conn.linkMisses ?? []).filter((at) => now - at < 60_000);
+    if (conn.linkMisses.length >= this.options.linkTries) {
+      return conn.send({ t: 'error', message: 'Too many wrong codes. Wait a minute and try again.' });
+    }
+    const code = String(msg.code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const link = this.links.get(code);
+    if (!link || link.expires <= now) {
+      conn.linkMisses.push(now);
+      return conn.send({ t: 'error', message: 'That code isn’t right, or it has run out. A code works once, for a few minutes.' });
+    }
+    if (link.pid === conn.pid) return conn.send({ t: 'error', message: 'That code is from this browser. Type it on the other device.' });
+    this.links.delete(code);
+    conn.send({ t: 'linked', player: link.secret, name: link.name });
+  }
+
   // ---- joining and leaving ----
 
   create(conn, msg) {
@@ -226,6 +299,8 @@ export class Rooms {
       botKey: null,
       rating: null, // set when a game starts: who is playing for rating points, and the outcome
       ttlTimer: null,
+      chat: [], // what the people in the room have said to each other lately
+      chatSeq: 0,
     };
     this.rooms.set(code, room);
     const member = this.addMember(room, { name: msg.name, team: 'A', pid: conn.pid });
@@ -283,7 +358,7 @@ export class Rooms {
     Object.assign(member, { conn, connected: true, gone: false, botControlled: false });
     conn.room = room;
     conn.member = member;
-    conn.send({ t: 'joined', code: room.code, id: member.id, token: member.token });
+    conn.send({ t: 'joined', code: room.code, id: member.id, token: member.token, chat: room.chat });
   }
 
   /** The connection is going away: `left` if the player chose to leave, false if it just dropped. */
@@ -298,13 +373,7 @@ export class Rooms {
       // Someone holding cards keeps their seat so the game can go on without them.
       if (!this.seated(room, member)) this.remove(room, member);
     } else {
-      member.graceTimer = timer(() => {
-        if (member.connected || room.members.get(member.id) !== member) return;
-        member.gone = true;
-        if (!this.seated(room, member)) this.remove(room, member);
-        this.pickHost(room);
-        this.broadcast(room);
-      }, this.options.graceMs);
+      this.awaitReturn(room, member);
     }
     this.pickHost(room);
     this.broadcast(room);
@@ -314,6 +383,18 @@ export class Rooms {
     }
   }
 
+  /** A member's connection has gone: they have a while to come back before the room moves on without them. */
+  awaitReturn(room, member) {
+    clearTimeout(member.graceTimer);
+    member.graceTimer = timer(() => {
+      if (member.connected || room.members.get(member.id) !== member) return;
+      member.gone = true;
+      if (!this.seated(room, member)) this.remove(room, member);
+      this.pickHost(room);
+      this.broadcast(room);
+    }, this.options.graceMs);
+  }
+
   remove(room, member) {
     clearTimeout(member.graceTimer);
     room.members.delete(member.id);
@@ -321,7 +402,8 @@ export class Rooms {
     member.conn = null;
   }
 
-  destroy(room) {
+  /** Stops a room's timers and lets go of its connections. */
+  release(room) {
     clearTimeout(room.botTimer);
     clearTimeout(room.ttlTimer);
     clearTimeout(room.clock?.timer);
@@ -329,8 +411,100 @@ export class Rooms {
       clearTimeout(member.graceTimer);
       if (member.conn) member.conn.room = member.conn.member = null;
     }
+  }
+
+  /** The room is over for good: nothing of it is kept. */
+  destroy(room) {
+    this.release(room);
     this.rooms.delete(room.code);
+    this.unsaved.delete(room.code);
+    this.store?.remove(room.code);
     this.touchLobby();
+  }
+
+  // ---- keeping rooms across a restart ----
+  //
+  // With a store, every room is written to disk shortly after it changes, and a
+  // new process starts by reading them back. A game is saved as its deal and
+  // its moves and is played back to restore it, so what comes back is exactly a
+  // game the rules allow. Connections can't be saved: everyone comes back as
+  // someone whose connection has just dropped, and their browser reconnects by
+  // itself with the seat token it kept.
+
+  /** Marks a room as changed, to be saved in a moment. */
+  persist(room) {
+    if (!this.store || this.rooms.get(room.code) !== room) return;
+    this.unsaved.add(room.code);
+    this.saveTimer ??= timer(() => this.flush(), this.options.saveDelayMs);
+  }
+
+  /** Resolves once everything waiting to be written is on disk: the rooms, the ratings and the history. */
+  async saved() {
+    this.flush();
+    await Promise.all([this.ratings.writing, this.history.writing]);
+  }
+
+  /** Saves every room that has changed, now. */
+  flush() {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    for (const code of this.unsaved) {
+      const room = this.rooms.get(code);
+      if (room) this.store.write(code, this.snapshot(room));
+    }
+    this.unsaved.clear();
+  }
+
+  /** A room as plain data: everything needed to carry it on in another process. */
+  snapshot(room) {
+    return {
+      version: 1,
+      savedAt: Date.now(),
+      code: room.code,
+      public: room.public,
+      createdAt: room.createdAt,
+      hostId: room.hostId,
+      nextId: room.nextId,
+      settings: room.settings,
+      members: [...room.members.values()].map(({ id, token, pid, name, team, isBot, gone, botControlled }) => ({ id, token, pid, name, team, isBot, gone, botControlled })),
+      chat: room.chat,
+      game: room.game && recordOf(room.game),
+      rating: room.rating,
+      bank: room.clock && Object.fromEntries(room.clock.bank), // each player's time bank, as it stood after the last move
+    };
+  }
+
+  /** Rebuilds a room from its snapshot. Throws if the snapshot is not one this code can carry on from. */
+  restore(saved) {
+    if (saved?.version !== 1 || !ROOM_CODE.test(saved.code) || this.rooms.has(saved.code)) throw new Error('not a saved room');
+    const room = {
+      code: saved.code,
+      members: new Map(),
+      nextId: saved.nextId,
+      createdAt: saved.createdAt,
+      public: Boolean(saved.public),
+      hostId: saved.hostId,
+      // A setting this version no longer offers falls back to its default.
+      settings: Object.fromEntries(Object.entries(SETTING_VALUES).map(([key, values]) => [key, values.includes(saved.settings?.[key]) ? saved.settings[key] : values[0]])),
+      game: saved.game ? replay(saved.game) : null,
+      botTimer: null,
+      botKey: null,
+      rating: saved.rating ?? null,
+      ttlTimer: null,
+      chat: saved.chat ?? [],
+      chatSeq: (saved.chat ?? []).reduce((max, message) => Math.max(max, message.id), 0),
+    };
+    for (const member of saved.members) room.members.set(member.id, { ...member, connected: member.isBot, conn: null, graceTimer: null });
+    if (room.game && !room.game.seats.every((seat) => room.members.has(seat.id))) throw new Error('a seat has no player');
+    if (room.game && !room.rating) throw new Error('a game with nobody playing for it');
+    // The clock starts afresh for whoever is to move; the time banks are as they were.
+    this.resetClock(room);
+    for (const [id, ms] of Object.entries(saved.bank ?? {})) if (room.clock?.bank.has(id)) room.clock.bank.set(id, ms);
+    this.rooms.set(room.code, room);
+    // Nobody is connected yet. Each person has the usual while to come back, and the room as long as any empty one.
+    for (const member of room.members.values()) if (!member.isBot && !member.gone) this.awaitReturn(room, member);
+    room.ttlTimer = timer(() => this.destroy(room), this.options.emptyTtlMs);
+    return room;
   }
 
   /** Hands the host role on once the host has really gone. */
@@ -527,6 +701,7 @@ export class Rooms {
 
   broadcast(room) {
     if (this.rooms.get(room.code) !== room) return;
+    this.persist(room);
     this.syncClock(room);
     const log = this.visibleLog(room);
     for (const member of room.members.values()) member.conn?.send(this.view(room, member, log));
@@ -645,6 +820,9 @@ export class Rooms {
       },
       { id: rating.gameId, ...summary, ...record },
     );
+    // The result is in the ratings and the history now: save the room to match, without waiting.
+    this.persist(room);
+    this.flush();
   }
 
   // ---- the clock ----

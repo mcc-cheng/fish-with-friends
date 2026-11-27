@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, test } from 'node:test';
 import WebSocket from 'ws';
 import { createApp } from '../server/app.js';
@@ -91,8 +94,8 @@ async function createRoom(name = 'Host', player, toPort) {
   return { host, code, token, id };
 }
 
-async function joinRoom(code, name, token, player) {
-  const client = await connect();
+async function joinRoom(code, name, token, player, toPort) {
+  const client = await connect(toPort);
   const joined = client.next((m) => m.t === 'joined' || m.t === 'error');
   client.send({ t: 'join', code, name, token, player });
   const reply = await joined;
@@ -739,8 +742,8 @@ test('a connection that sends too much is told so, never just ignored', async ()
 });
 
 /** Someone sitting in the lobby: connects, says hello, and resolves with the client and the first lobby snapshot. */
-async function enterLobby(name, player) {
-  const client = await connect();
+async function enterLobby(name, player, toPort) {
+  const client = await connect(toPort);
   const first = client.next((m) => m.t === 'lobby');
   client.send({ t: 'hello', name, player });
   return { client, lobby: await first };
@@ -809,10 +812,9 @@ test('lobby chat reaches the people in the lobby, with a backlog for newcomers',
   assert.deepEqual((await heardByAnn).message, message.message);
   assert.ok(message.message.hue >= 0 && message.message.hue < 360 && message.message.at <= Date.now());
 
-  // Too fast, empty, or sent from inside a game: nothing is posted.
+  // Too fast or empty: nothing is posted.
   assert.match((await ann.fails({ t: 'chat', text: 'and again' })).message, /One message at a time/);
   ben.send({ t: 'chat', text: '   ' });
-  assert.match((await inGame.fails({ t: 'chat', text: 'hello from a game' })).message, /lobby/);
   // Long messages are cut, and a renamed player speaks under the new name.
   const long = ann.next((m) => m.t === 'chat' && m.message.name === 'Benedict');
   ben.send({ t: 'chat', name: 'Benedict', text: 'x'.repeat(500) });
@@ -918,4 +920,244 @@ test('the same browser gets its seat back in a new tab, without a session token'
   const restored = await back.state(() => true, { fresh: false });
   assert.deepEqual(restored.game.hand, hand, 'and to the cards she was holding');
   assert.equal(restored.members.find((m) => m.id === reply.id).online, true);
+});
+
+test('the people in a room have a chat of their own, which the lobby does not hear', async () => {
+  const { client: outside } = await enterLobby('Outside', secret());
+  const { host, code } = await createRoom('Ada', secret());
+  const { client: guest } = await joinRoom(code, 'Grace', undefined, secret());
+  await guest.act({ t: 'team', team: null }, (s) => s.members.find((m) => m.id === s.you).team === null);
+
+  const heard = [host, guest].map((client) => client.next((m) => m.t === 'chat'));
+  host.send({ t: 'chat', text: '  shall we   start? ' });
+  const [mine, theirs] = await Promise.all(heard);
+  assert.deepEqual(mine, theirs);
+  assert.equal(mine.room, code);
+  assert.deepEqual({ ...mine.message, at: null }, { id: 1, name: 'Ada', team: 'A', text: 'shall we start?', at: null });
+
+  // Someone watching speaks under no team, and the same limits apply as in the lobby.
+  const reply = host.next((m) => m.t === 'chat');
+  guest.send({ t: 'chat', text: 'y'.repeat(400) });
+  const { message } = await reply;
+  assert.deepEqual([message.id, message.name, message.team, message.text.length], [2, 'Grace', null, 240]);
+  assert.match((await guest.fails({ t: 'chat', text: 'and again' })).message, /One message at a time/);
+
+  // A newcomer is handed what was said before they arrived. The lobby heard nothing.
+  const late = await joinRoom(code, 'Late');
+  assert.deepEqual(late.reply.chat.map((m) => [m.name, m.text.slice(0, 5)]), [['Ada', 'shall'], ['Grace', 'yyyyy']]);
+  assert.equal(await Promise.race([outside.next((m) => m.t === 'chat', { fresh: false }), pause(30).then(() => 'nothing')]), 'nothing');
+});
+
+test('a profile moves to another device with a code that works once', async () => {
+  const [ada, phone] = [secret(), secret()];
+  const { client: desk } = await enterLobby('Ada', ada);
+  const { client: mobile } = await enterLobby('Guest 1234', phone);
+  const codeFor = async (client, player) => {
+    const reply = client.next((m) => m.t === 'linkCode' || m.t === 'error');
+    client.send({ t: 'linkCode', player });
+    return reply;
+  };
+  const use = async (client, code) => {
+    const reply = client.next((m) => m.t === 'linked' || m.t === 'error');
+    client.send({ t: 'linkUse', code });
+    return reply;
+  };
+
+  const { code, minutes } = await codeFor(desk, ada);
+  assert.match(code, /^[BCDFGHJKLMNPQRSTVWXZ2-9]{8}$/);
+  assert.equal(minutes, 10);
+
+  // The browser that made the code can't use it, and a wrong one is refused.
+  assert.match((await use(desk, code)).message, /from this browser/);
+  assert.match((await use(mobile, 'BCDF2345')).message, /isn’t right/);
+  // Typed the way a person would, on the other device: it is given the first one's key, and its name.
+  assert.deepEqual(await use(mobile, ` ${code.slice(0, 4).toLowerCase()}-${code.slice(4)} `), { t: 'linked', player: ada, name: 'Ada' });
+  // With that key the phone is the same player: the same rating record.
+  assert.deepEqual((await ratingsFor(mobile, ada)).me, (await ratingsFor(desk, ada)).me);
+  // The code is spent.
+  const { client: third } = await enterLobby('Third', secret());
+  assert.match((await use(third, code)).message, /isn’t right/);
+
+  // A new code replaces the one before it. A browser with no key has nothing to share.
+  const first = (await codeFor(desk, ada)).code;
+  const second = (await codeFor(desk, ada)).code;
+  assert.notEqual(first, second);
+  assert.match((await use(third, first)).message, /isn’t right/);
+  assert.equal((await use(third, second)).player, ada);
+  const { client: guest } = await enterLobby('Guest');
+  assert.match((await codeFor(guest)).message, /no profile to share/);
+
+  // Guessing gets a connection nowhere: after a few wrong codes it has to wait.
+  const { client: guesser } = await enterLobby('Guesser', secret());
+  const live = (await codeFor(desk, ada)).code;
+  for (let i = 0; i < 5; i++) assert.match((await use(guesser, `BCDF234${i + 2}`)).message, /isn’t right/);
+  assert.match((await use(guesser, live)).message, /Too many wrong codes/);
+});
+
+test('a code for moving a profile runs out', async () => {
+  const brief = createApp({ linkTtlMs: 40, lobbyDelayMs: 5 });
+  const briefPort = await brief.listen(0, '127.0.0.1');
+  try {
+    const ada = secret();
+    const { client: desk } = await enterLobby('Ada', ada, briefPort);
+    const { client: mobile } = await enterLobby('Phone', secret(), briefPort);
+    const made = desk.next((m) => m.t === 'linkCode');
+    desk.send({ t: 'linkCode', player: ada });
+    const { code } = await made;
+    await pause(80);
+    assert.match((await mobile.fails({ t: 'linkUse', code })).message, /run out/);
+  } finally {
+    await brief.close();
+  }
+});
+
+/** A folder for a server's data that is cleared away when the test ends. */
+function tempDataDir(t) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'fish-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+test('restarting the server carries on with the games in progress', async (t) => {
+  const dataDir = tempDataDir(t);
+  // A "second" of the clock lasts 20ms here: 3 minutes a move is 3.6s, and a 5 minute bank is 6s.
+  const options = { dataDir, botDelay: [0, 0], graceMs: 150, lobbyDelayMs: 5, saveDelayMs: 5, secondMs: 20, messagesPer10s: 100_000 };
+  const [ada, grace] = [secret(), secret()];
+  let server = createApp(options);
+  let at = await server.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+
+  // Ada and a bot against Grace and a bot, with house rules that aren't the defaults.
+  const { host, code, token, id } = await createRoom('Ada', ada, at);
+  const { client: guest, reply: graceSeat } = await joinRoom(code, 'Grace', undefined, grace, at);
+  await host.act({ t: 'addBot', team: 'A' }, (s) => s.members.length === 3);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 4);
+  await host.act({ t: 'settings', settings: { deck: 72, declare: 'anytime', moveTime: 180, timeBank: 300 } }, (s) => s.settings.timeBank === 300);
+  const started = guest.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  await started;
+
+  // A few moves in: whoever of the two is to move declares a set to themselves, twice over.
+  const clients = new Map([[id, host], [graceSeat.id, guest]]);
+  for (let moves = 0; moves < 2; moves++) {
+    const seen = await humanToMove(host);
+    const mover = clients.get(seen.game.turn);
+    let state = await mover.state(() => true, { fresh: false });
+    while (state.game.position < seen.game.position) state = await mover.state();
+    const open = state.game.sets.find((set) => !set.claimedBy);
+    await mover.act({ t: 'declare', set: open.id, assignment: allToMe(open.id, state.you) }, (s) => s.game.sets.find((x) => x.id === open.id).claimedBy);
+  }
+  const said = host.next((m) => m.t === 'chat');
+  guest.send({ t: 'chat', text: 'back in a second' });
+  await said;
+  await humanToMove(host);
+  const before = { ada: await host.state(() => true, { fresh: false }), grace: await guest.state(() => true, { fresh: false }) };
+  assert.equal(before.ada.game.position, before.grace.game.position);
+  assert.ok(before.ada.game.position >= 2 && before.ada.phase === 'playing');
+
+  // ---- the server stops, and a new one starts on the same folder
+  await server.close();
+  assert.ok(existsSync(path.join(dataDir, 'rooms', `${code}.json`)), 'the room is on disk');
+  server = createApp(options);
+  at = await server.listen(0, '127.0.0.1');
+
+  // Ada's browser reconnects with the token it kept, and finds the game as it was.
+  const back = await joinRoom(code, 'Ada', token, ada, at);
+  assert.equal(back.reply.id, id);
+  assert.deepEqual(back.reply.chat.map((m) => [m.name, m.text]), [['Grace', 'back in a second']]);
+  const mine = await back.client.state(() => true, { fresh: false });
+  const table = (state) => ({
+    members: state.members.map((m) => ({ ...m, online: null, bank: null })),
+    game: { ...state.game, clock: null },
+    settings: state.settings,
+    hostId: state.hostId,
+    public: state.public,
+    unrated: state.unrated,
+  });
+  assert.deepEqual(table(mine), table(before.ada), 'the same hand, the same log, the same turn, the same rules');
+  assert.deepEqual(mine.members.map((m) => [m.name, m.online]).sort(), [['Ada', true], ['Grace', false], ['Guppy', true], ['Minnow', true]]);
+  // Time banks are as they were; the player to move gets their move time afresh.
+  assert.deepEqual(mine.members.map((m) => m.bank), before.ada.members.map((m) => m.bank));
+  assert.equal(mine.game.clock.player, mine.game.turn);
+  assert.ok(mine.game.clock.move > 3000, `a fresh move's time: ${mine.game.clock.move}`);
+
+  // Grace comes back from the same browser, with no token: her seat, her cards.
+  const hers = await joinRoom(code, 'Grace', undefined, grace, at);
+  assert.equal(hers.reply.id, graceSeat.id);
+  assert.deepEqual((await hers.client.state(() => true, { fresh: false })).game.hand, before.grace.game.hand);
+
+  // They play it out. It is rated (the two bots, one a side, cancel out), and counted once.
+  const end = await playToEnd([back.client, hers.client]);
+  assert.deepEqual(end.game.ratingChanges.map((change) => change.name).sort(), ['Ada', 'Grace']);
+  const profile = async (client) => {
+    const reply = client.next((m) => m.t === 'profile');
+    client.send({ t: 'profile' });
+    return reply;
+  };
+  assert.equal((await profile(back.client)).stats.games, 1);
+
+  // ---- another restart, after the end: the result is still on the table, and nothing is counted again
+  await server.close();
+  server = createApp(options);
+  at = await server.listen(0, '127.0.0.1');
+  const later = await joinRoom(code, 'Ada', token, ada, at);
+  const result = await later.client.state(() => true, { fresh: false });
+  assert.equal(result.phase, 'finished');
+  assert.deepEqual([result.game.winner, result.game.score, result.game.reviewId], [end.game.winner, end.game.score, end.game.reviewId]);
+  assert.deepEqual(result.game.ratingChanges, end.game.ratingChanges);
+  const again = await profile(later.client);
+  assert.deepEqual([again.stats.games, again.me.games], [1, 1]);
+  // The finished game's review survived too, in the history.
+  const asked = later.client.next((m) => m.t === 'review');
+  later.client.send({ t: 'review', id: result.game.reviewId });
+  assert.equal((await asked).record.log.length, result.game.position);
+});
+
+test('a room waiting for players survives a restart, and a room that is over leaves nothing behind', async (t) => {
+  const dataDir = tempDataDir(t);
+  const options = { dataDir, graceMs: 60, emptyTtlMs: 120, lobbyDelayMs: 5, saveDelayMs: 5 };
+  const ada = secret();
+  let server = createApp(options);
+  let at = await server.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  const file = (code) => path.join(dataDir, 'rooms', `${code}.json`);
+
+  const { host, code, token, id } = await createRoom('Ada', ada, at);
+  await host.act({ t: 'addBot', team: 'B' }, (s) => s.members.length === 2);
+  await host.act({ t: 'settings', settings: { history: 'last' } }, (s) => s.settings.history === 'last');
+  await pause(30);
+  assert.equal(JSON.parse(readFileSync(file(code), 'utf8')).members.length, 2, 'saved as it changes, without waiting for a shutdown');
+
+  // Files the new server can make nothing of are passed over: damaged, or from a version it doesn't know.
+  writeFileSync(file('BCDF'), '{"version": 1, "code": "BCDF", "mem');
+  writeFileSync(file('GHJK'), JSON.stringify({ version: 99, code: 'GHJK' }));
+  mkdirSync(path.join(dataDir, 'rooms', 'not-a-room'));
+  await server.close();
+  const complaints = t.mock.method(console, 'error', () => {});
+  server = createApp(options);
+  complaints.mock.restore();
+  assert.equal(complaints.mock.callCount(), 2, 'each unusable file is reported');
+  at = await server.listen(0, '127.0.0.1');
+  for (const lost of ['BCDF', 'GHJK']) {
+    assert.equal((await joinRoom(lost, 'Nobody', undefined, undefined, at)).reply.code, 'no-room');
+    rmSync(file(lost));
+  }
+
+  // The waiting room is back: its teams, its rules, and Ada as host.
+  const back = await joinRoom(code, 'Ada', token, ada, at);
+  const lobby = await back.client.state(() => true, { fresh: false });
+  assert.deepEqual([back.reply.id, lobby.phase, lobby.hostId, lobby.settings.history], [id, 'lobby', id, 'last']);
+  assert.deepEqual(lobby.members.map((m) => [m.name, m.team, m.bot]), [['Ada', 'A', false], ['Guppy', 'B', true]]);
+  // New players are numbered on from where the room left off.
+  const { reply: newcomer } = await joinRoom(code, 'Grace', undefined, undefined, at);
+  assert.equal(newcomer.id, 'p3');
+
+  // Everyone leaves; once the empty room is cleared away, so is its file.
+  await server.close();
+  server = createApp(options);
+  at = await server.listen(0, '127.0.0.1');
+  assert.ok(existsSync(file(code)));
+  await pause(250);
+  assert.ok(!existsSync(file(code)), 'a room nobody came back to is removed, file and all');
+  assert.equal((await joinRoom(code, 'Ada', token, ada, at)).reply.code, 'no-room');
 });

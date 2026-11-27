@@ -233,6 +233,14 @@ button:disabled {
   --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M20.6 13.4A8.8 8.8 0 1 1 10.6 3.4a7.6 7.6 0 0 0 10 10z'/%3E%3C/svg%3E");
 }
 
+.icon-sound {
+  --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3.5 9.3h3.7l5.3-4.4v14.2l-5.3-4.4H3.5z'/%3E%3Cpath d='M15.6 9a4.3 4.3 0 0 1 0 6M18.2 6.2a8.2 8.2 0 0 1 0 11.6' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+.icon-mute {
+  --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3.5 9.3h3.7l5.3-4.4v14.2l-5.3-4.4H3.5z'/%3E%3Cpath d='M15.8 9.2l5.6 5.6M21.4 9.2l-5.6 5.6' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
 /* A suit mark standing on the page takes its suit's colour. */
 .pip.suit-S {
   color: var(--suit-S);
@@ -828,6 +836,34 @@ a.name:hover {
   flex: 1;
 }
 
+/* Taking the profile to another device: a code made here, or one typed in. */
+.link-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.link-panel h2 {
+  font-size: 1.3rem;
+}
+
+.link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.link-row input {
+  flex: 1 1 200px;
+  max-width: 280px;
+}
+
+.link-code {
+  font-size: 1.5rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(95px, 1fr));
@@ -1259,6 +1295,16 @@ a.icon-btn {
 
 .start-note {
   flex-basis: 100%;
+}
+
+/* The room's chat, while waiting: under the teams, or beside everything on a wide screen (see the screen sizes). */
+.room-chat {
+  height: 204px;
+}
+
+.room-chat h2 {
+  font-size: 1.1rem;
+  text-align: left;
 }
 
 /* ---- game layout ---- */
@@ -1896,9 +1942,35 @@ a.icon-btn {
   padding: 10px 12px;
 }
 
-.log h2 {
+/* The log and the room's chat take turns in the panel. */
+.log-tabs {
+  align-self: flex-start;
   margin-bottom: 7px;
-  font-size: 1.25rem;
+}
+
+.log-tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 11px;
+}
+
+.log-tabs .tab-count {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+.log .chat-list {
+  min-height: 92px;
+  max-height: 255px;
+  font-size: 0.95rem;
+}
+
+.log .chat-form {
+  margin-top: 7px;
+}
+
+.log .chat-form input {
+  padding-block: 6px;
 }
 
 .log-list {
@@ -2273,6 +2345,199 @@ a.btn {
   text-align: right;
 }
 
+/* Whose view of the table: everyone's, or one player's. */
+.review-seen {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 6px;
+}
+
+.review-seen .pill {
+  min-height: 30px;
+  padding-block: 3px;
+}
+
+.review-seat.self {
+  box-shadow: inset 3px 0 0 var(--team-fill);
+}
+
+/* A card the viewer couldn't place, shown because the real hands were asked for. */
+.review-cards .chip.unplaced {
+  opacity: 0.4;
+}
+
+/* One player's knowledge: a small table for each set, a row per player and a column per card. */
+.review-know {
+  display: grid;
+  gap: 10px;
+  padding: 10px 14px 12px;
+}
+
+.know-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 14px;
+}
+
+.know-head h2 {
+  font-size: 1.1rem;
+}
+
+.know-truth {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+
+.know-truth input {
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.know-sets {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(calc(88px + var(--n) * 27px), 1fr));
+  gap: 14px 22px;
+}
+
+.know-set {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.85rem;
+}
+
+.know-set caption {
+  padding-bottom: 3px;
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.know-set caption .muted {
+  font-weight: 400;
+}
+
+.know-set th,
+.know-set td {
+  height: 21px;
+  padding: 0;
+  text-align: center;
+}
+
+.know-set thead th:first-child {
+  width: 88px;
+}
+
+.know-set thead .chip {
+  padding: 0 2px;
+  font-size: 0.78rem;
+}
+
+.know-set tbody tr {
+  border-top: 1px solid var(--line);
+}
+
+.know-set tbody th {
+  color: var(--team);
+  font-weight: 650;
+  text-align: left;
+}
+
+.know-who {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding-right: 4px;
+}
+
+.know-who .nm {
+  font-weight: inherit;
+}
+
+.know-set tr.self th {
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.know-set tr.out,
+.know-set.won {
+  opacity: 0.4;
+}
+
+/* The move being looked at: the card asked for and who was asked, or the set declared. */
+.know-set th.hot .chip {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.know-set td.hot {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+.know-set.hot caption {
+  color: var(--primary);
+}
+
+.know {
+  position: relative;
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.know.has {
+  background: var(--team, var(--text));
+}
+
+.know.maybe {
+  box-shadow: inset 0 0 0 1px var(--ghost-line);
+}
+
+.know.no {
+  width: 9px;
+  height: 9px;
+  color: var(--muted);
+  opacity: 0.5;
+}
+
+.know.real::after {
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--primary);
+  content: '';
+}
+
+.know-some {
+  flex: none;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.know-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 16px;
+}
+
+.know-key > span {
+  white-space: nowrap;
+}
+
 .review-moves {
   padding: 10px 12px;
 }
@@ -2470,6 +2735,28 @@ a.btn {
   }
 }
 
+/* A wide screen has room for the chat beside the teams and the rules, where it stays as they scroll. */
+@media (min-width: 1100px) {
+  .setup {
+    grid-template-columns: minmax(0, 731px) 300px;
+    align-items: start;
+    column-gap: 20px;
+    max-width: 1079px;
+  }
+
+  .setup > * {
+    grid-column: 1;
+  }
+
+  .setup > .room-chat {
+    position: sticky;
+    top: 14px;
+    grid-row: 1 / span 5;
+    grid-column: 2;
+    height: min(72vh, 520px);
+  }
+}
+
 @media (min-width: 720px) {
   .scoreboard {
     grid-template-areas: 'a sets b';
@@ -2518,7 +2805,8 @@ a.btn {
     overflow: hidden;
   }
 
-  .log-list {
+  .log-list,
+  .log .chat-list {
     flex: 1;
     min-height: 0;
     max-height: none;
