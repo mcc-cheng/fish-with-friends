@@ -44,6 +44,19 @@ const SETTINGS = [
   },
 ];
 
+// The clock's two settings, in seconds; 0 switches that part off.
+const CLOCK_SETTINGS = [
+  { key: 'moveTime', label: 'Time per move', none: 'No limit', values: [0, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300] },
+  { key: 'timeBank', label: 'Time bank', none: 'None', values: [0, 15, 30, 60, 120, 180, 300, 600] },
+];
+
+/** A length of time in words: "45 seconds", "2 minutes", "1 min 30 s". */
+function duration(seconds) {
+  if (seconds < 60) return `${seconds} seconds`;
+  if (seconds % 60) return `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+  return seconds === 60 ? '1 minute' : `${seconds / 60} minutes`;
+}
+
 // ---------------------------------------------------------------- storage
 
 function load(storage, key) {
@@ -154,6 +167,7 @@ const state = {
   askCard: null,
   askTarget: null,
   declOpen: false,
+  clockAt: 0, // when the latest state arrived, by this page's own clock: the countdown runs from here
   declSet: null,
   declSide: 'mine', // whose players the declaration names: 'mine' (your team) or 'theirs'
   declAssign: {},
@@ -212,6 +226,7 @@ function receive(msg) {
       const before = state.view ? (state.view.game?.hand ?? []) : null;
       state.fresh = new Set(before && msg.game ? msg.game.hand.filter((card) => !before.includes(card)) : []);
       state.view = msg;
+      state.clockAt = performance.now();
       state.stale = Boolean(msg.stale);
       state.busy = false;
       reconcile();
@@ -446,10 +461,13 @@ function morph(from, to) {
     else if (from !== document.activeElement && from.value !== to.value) from.value = to.value;
   }
 
+  const chosen = from.nodeName === 'SELECT' ? to.value : null;
+
   const before = [...from.childNodes];
   const after = [...to.childNodes];
   after.forEach((node, i) => (before[i] ? morph(before[i], node) : from.append(node)));
   before.slice(after.length).forEach((node) => node.remove());
+  if (chosen !== null && from.value !== chosen) from.value = chosen;
 }
 
 function render() {
@@ -534,6 +552,51 @@ function cardEl(card, { small = false, fresh = false } = {}) {
 function cardChip(card) {
   const info = cardInfo(card);
   return h('span', { class: `chip suit-${info.tint}`, role: 'img', 'aria-label': info.name, title: info.name }, info.rank, pip(info.suit));
+}
+
+/** Minutes and seconds left, rounded up so the clock reads 0:00 only when time is really up. */
+function mmss(ms) {
+  const seconds = Math.ceil(ms / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/** What the player on the clock has left at this moment, counted down from the server's last word on it. */
+function clockNow() {
+  const clock = state.view?.game?.clock;
+  if (!clock) return null;
+  const spent = performance.now() - state.clockAt;
+  const move = Math.max(0, clock.move - spent);
+  const bank = Math.max(0, clock.bank - Math.max(0, spent - clock.move));
+  const onBank = move <= 0;
+  return { player: clock.player, onBank, low: (onBank ? bank : move) <= 10_000, move: mmss(move), bank: `+${mmss(bank)}` };
+}
+
+/**
+ * The countdown for the player to move: their time for this move, then their
+ * time bank. `brief` shows only whichever of the two is running. Between
+ * renders, tickClock() rewrites every one of these in place.
+ */
+function clockEl({ brief = false } = {}) {
+  const now = clockNow();
+  if (!now) return null;
+  return h(
+    'span',
+    { class: cls('clock', brief && 'brief', now.onBank && 'on-bank', now.low && 'low'), role: 'timer', title: 'Time for this move, then the time bank' },
+    h('span', { class: 'clock-move' }, now.move),
+    h('span', { class: 'clock-bank' }, now.bank),
+  );
+}
+
+function tickClock() {
+  const now = clockNow();
+  if (!now) return;
+  for (const el of document.querySelectorAll('.clock')) {
+    el.classList.toggle('on-bank', now.onBank);
+    el.classList.toggle('low', now.low);
+    const [move, bank] = el.children;
+    if (move.textContent !== now.move) move.textContent = now.move;
+    if (bank.textContent !== now.bank) bank.textContent = now.bank;
+  }
 }
 
 /** Short name for a set: its suit mark and "low" or "high". */
@@ -912,6 +975,11 @@ function helpScreen() {
         p('The game ends when all nine sets are won. Nine is odd, so there is always a winner.'),
       ),
       section(
+        'The clock',
+        p('If the host has set a time limit, each move has that long. Take longer and your ', b('time bank'), ' starts to run down: extra time that has to last you the whole game. It does not refill.'),
+        p('When your move time and your time bank are both gone, you lose the turn. It passes to the next opponent round the table who has cards, as if you had asked and missed. Bots are not timed.'),
+      ),
+      section(
         'House rules',
         p('The host chooses these before the game starts.'),
         h(
@@ -921,6 +989,7 @@ function helpScreen() {
           h('li', {}, b('Declaring'), ': whenever your team has the turn, only on your own turn, or at any time by anyone.'),
           h('li', {}, b('Bot moves'), ': one at a time, with a bot waiting until a player presses Next (or Space); or automatically after a short pause.'),
           h('li', {}, b('Question history'), ': a full log everyone can scroll back through, or only the last question, as at a real table.'),
+          h('li', {}, b('Clock'), ': the time for each move (10 seconds to 5 minutes, or no limit) and each player’s time bank (up to 10 minutes, or none).'),
         ),
       ),
       section(
@@ -948,6 +1017,12 @@ function memberTags(m, { host = true } = {}) {
     !m.bot && !m.online && tag('offline', 'warn'),
     m.auto && tag('bot playing'),
   ];
+}
+
+/** The clock's settings in a sentence. */
+function clockSummary({ moveTime, timeBank }) {
+  if (!moveTime) return 'No time limit';
+  return `${duration(moveTime)} a move, ${timeBank ? `with a time bank of ${duration(timeBank)}` : 'and no time bank'}`;
 }
 
 function setupScreen() {
@@ -1023,6 +1098,38 @@ function setupScreen() {
               h('span', {}, h('strong', {}, title), h('span', { class: 'muted small' }, detail)),
             ),
           ),
+      ),
+    ),
+    h(
+      'fieldset',
+      { class: 'clock-rules' },
+      h('legend', {}, 'Clock'),
+      isHost
+        ? h(
+            'div',
+            { class: 'clock-fields' },
+            CLOCK_SETTINGS.map(({ key, label, none, values }) =>
+              h(
+                'label',
+                { class: 'select-field' },
+                h('span', {}, label),
+                h(
+                  'select',
+                  {
+                    // A time bank is extra time on top of a limit, so it means nothing without one.
+                    disabled: key === 'timeBank' && v.settings.moveTime === 0,
+                    onchange: (event) => send({ t: 'settings', settings: { [key]: Number(event.target.value) } }),
+                  },
+                  values.map((n) => h('option', { value: n, selected: v.settings[key] === n }, n ? duration(n) : none)),
+                ),
+              ),
+            ),
+          )
+        : h('p', { class: 'clock-summary' }, clockSummary(v.settings)),
+      h(
+        'p',
+        { class: 'muted small' },
+        'Each move has this long. After that your time bank runs down: extra time that has to last you the whole game. When both are gone, you lose the turn. Bots aren’t timed.',
       ),
     ),
   );
@@ -1190,6 +1297,7 @@ function playersPanel(c) {
 
 function seat(c, m) {
   const turn = c.g.turn === m.id;
+  const timed = c.g.clock?.player === m.id;
   const away = !m.bot && !m.online;
   const playing = c.v.phase === 'playing';
   return h(
@@ -1200,7 +1308,14 @@ function seat(c, m) {
       { class: 'seat-main' },
       h('span', { class: 'nm', title: m.name }, m.name),
       // Always there, so a seat keeps its height when the turn arrives.
-      h('div', { class: 'seat-tags' }, memberTags(m, { host: false }), turn ? h('span', { class: 'turn-pill' }, 'to play') : null),
+      h(
+        'div',
+        { class: 'seat-tags' },
+        memberTags(m, { host: false }),
+        // On the clock, the countdown says "to play" by itself.
+        turn ? h('span', { class: 'turn-pill' }, timed ? clockEl({ brief: true }) : 'to play') : null,
+        m.bank != null && !timed ? h('span', { class: 'bank-tag', title: 'Time bank: extra time left for the rest of the game' }, `+${mmss(m.bank)}`) : null,
+      ),
       playing && away && c.isHost
         ? h('button', { class: 'btn tiny', onclick: () => send({ t: 'botControl', id: m.id, on: !m.auto }) }, m.auto ? 'Stop the bot' : 'Let a bot play')
         : null,
@@ -1233,6 +1348,9 @@ function banner(c) {
       last.success ? ' and got it. ' : [', but ', who(c, last.target), last.target === c.v.you ? ' don’t' : ' doesn’t', ' have it. '],
       next,
     );
+  } else if (last.type === 'timeout') {
+    tone = 'bad';
+    body = h('p', { class: 'banner-text' }, who(c, last.player, { capital: true }), ' ran out of time and ', last.player === c.v.you ? 'lose' : 'loses', ' the turn. ', next);
   } else {
     const set = c.sets.find((s) => s.id === last.set);
     tone = last.correct ? 'good' : 'bad';
@@ -1273,6 +1391,7 @@ function banner(c) {
     'section',
     { class: cls('banner panel', tone, c.canStep && 'stepping'), 'aria-live': 'polite' },
     h('div', { class: 'banner-body' }, body),
+    clockEl(),
     c.canStep
       ? h('button', { class: 'btn primary next-btn', disabled: state.busy, title: 'Let the bot make its move', onclick: stepBot }, 'Next', h('span', { class: 'key-hint', 'aria-hidden': 'true' }, 'space'))
       : null,
@@ -1374,7 +1493,13 @@ function actionPanel(c) {
   return h(
     'section',
     { class: `panel action mine ${tab === 'ask' ? 'asking' : 'declaring'}` },
-    h('div', { class: 'action-head' }, h('h2', {}, 'Your turn'), h('div', { class: 'tabs', role: 'tablist' }, tabButton('ask', 'Ask', !c.canAsk), tabButton('declare', 'Declare', false))),
+    h(
+      'div',
+      { class: 'action-head' },
+      h('h2', {}, 'Your turn'),
+      clockEl({ brief: true }),
+      h('div', { class: 'tabs', role: 'tablist' }, tabButton('ask', 'Ask', !c.canAsk), tabButton('declare', 'Declare', false)),
+    ),
     !c.canAsk ? h('p', { class: 'hint' }, 'There’s nothing you can ask for, so declare a set.') : null,
     tab === 'ask' ? askForm(c) : declareForm(c),
   );
@@ -1585,6 +1710,9 @@ function logPanel(c) {
         h('span', {}, who(c, event.asker, { capital: true }), ' asked ', who(c, event.target), ' for ', cardChip(event.card)),
       );
     }
+    if (event.type === 'timeout') {
+      return h('li', { class: 'bad' }, icon('cross'), h('span', {}, who(c, event.player, { capital: true }), ' ran out of time'));
+    }
     const set = c.sets.find((s) => s.id === event.set);
     return h(
       'li',
@@ -1624,6 +1752,8 @@ document.addEventListener('keydown', (event) => {
   event.preventDefault();
   button.click();
 });
+// The clock counts down on the page between the server's updates.
+setInterval(tickClock, 200);
 // Follow the system's light/dark setting until the player picks a theme themselves.
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
   if (load(localStorage, 'fish:theme')) return;

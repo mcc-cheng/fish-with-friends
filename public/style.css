@@ -34,6 +34,7 @@
 
   --good: #1a7f3f;
   --bad: #c43b2e;
+  --warn: #a35a00; /* the clock, once it is eating into the time bank */
 
   /* A four-colour deck. These are the suit colours on the page itself... */
   --suit-S: #1b1b19;
@@ -82,6 +83,7 @@
 
   --good: #7fdc9f;
   --bad: #ff9f93;
+  --warn: #ffc857;
 
   --suit-S: #ecebe6;
   --suit-H: #ff7f7f;
@@ -129,7 +131,8 @@ h2 {
 }
 
 button,
-input {
+input,
+select {
   color: inherit;
   font: inherit;
 }
@@ -1205,6 +1208,44 @@ a.icon-btn {
   display: block;
 }
 
+/* The clock is set with two dropdowns, not a card per option: there are too many lengths of time to list. */
+.settings .clock-rules {
+  display: block;
+}
+
+.clock-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 7px;
+}
+
+.select-field {
+  display: grid;
+  gap: 3px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.select-field select {
+  min-width: 150px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--raised);
+  font-size: 1rem;
+  font-weight: 400;
+}
+
+.select-field select:disabled {
+  opacity: 0.5;
+}
+
+.clock-summary {
+  margin-bottom: 5px;
+  font-weight: 650;
+}
+
 .start {
   display: flex;
   flex-wrap: wrap;
@@ -1408,7 +1449,8 @@ a.icon-btn {
 
 /* In a narrow seat "to play" takes the place of the tags, so the seat never grows a third line. */
 @container (max-width: 150px) {
-  .seat.turn .tag:not(.warn) {
+  .seat.turn .tag:not(.warn),
+  .bank-tag {
     display: none;
   }
 }
@@ -1516,6 +1558,80 @@ a.icon-btn {
 
 .reveal-item.wrong .chip {
   outline: 2px solid var(--bad);
+}
+
+/* ---- the clock: time for this move, then the time bank ---- */
+
+.clock {
+  display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: lining-nums tabular-nums;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.clock-bank {
+  color: var(--clock-quiet, var(--muted));
+  font-size: 0.75em;
+}
+
+/* Once the move's own time is up, the bank is the number that matters. */
+.clock.on-bank .clock-move {
+  opacity: 0.4;
+}
+
+.clock.on-bank .clock-bank {
+  color: var(--clock-warn, var(--warn));
+  font-size: 1em;
+}
+
+/* The last ten seconds of either. */
+.clock.low:not(.on-bank) .clock-move,
+.clock.low.on-bank .clock-bank {
+  color: var(--clock-urgent, var(--bad));
+}
+
+/* The short form shows one number: whichever of the two is running. */
+.clock.brief .clock-bank,
+.clock.brief.on-bank .clock-move {
+  display: none;
+}
+
+.clock.brief.on-bank .clock-bank {
+  display: inline;
+}
+
+.banner > .clock {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--raised);
+  font-size: 1.45rem;
+}
+
+.action-head > .clock {
+  margin-right: auto; /* beside "Your turn", not adrift in the middle */
+  font-size: 1.2rem;
+}
+
+/* On a seat the countdown sits in the "to play" marker, and keeps that marker's
+   own text colour: the warning colours would not show against the team's. */
+.turn-pill .clock {
+  --clock-quiet: currentColor;
+  --clock-warn: currentColor;
+  --clock-urgent: currentColor;
+  font-size: 0.82rem;
+}
+
+/* Extra time a player has left for the game. */
+.bank-tag {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: lining-nums tabular-nums;
+  font-weight: 700;
 }
 
 /* ---- your move ---- */

@@ -65,6 +65,9 @@ placeholder name ("Guest 1234"), which can be changed on the profile page.
 - You can declare whenever your team has the turn, even if it is a teammate's turn and not yours.
 - A player who runs out of cards hands the turn to the next teammate who has some. When a whole team is
   out of cards, the other team has to declare everything that's left.
+- Moves can be timed. Each move has a fixed time; go over it and your **time bank** runs down, extra time
+  that has to last you the whole game. When both are gone you lose the turn: it passes to the next
+  opponent round the table who has cards. Bots are not timed.
 - Most sets wins. With nine sets there are no ties.
 
 The host picks the house rules in the lobby:
@@ -75,6 +78,8 @@ The host picks the house rules in the lobby:
 | Declaring | **On your team's turn** (anyone on the team that has the turn), **on your own turn** only, or **any time** by anyone. |
 | Bot moves | **One at a time**: a bot waits until a player presses Next (or Space), so everyone can follow each move. **Automatic**: bots play by themselves after a short pause. |
 | Question history | **Full log** for everyone, or the **last question only** as at a real table. |
+| Time per move | **1 minute** unless changed: anything from 10 seconds to 5 minutes, or **no limit**. |
+| Time bank | **2 minutes** per player unless changed: from 15 seconds to 10 minutes, or **none**. |
 
 With bots moving one at a time, any seated player (or the host) can press Next, and each press lets the
 bot make exactly one decision. If two people press at once, only one move happens.

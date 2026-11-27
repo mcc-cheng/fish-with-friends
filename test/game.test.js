@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildSets, cardInfo, setIdOf, sortCards } from '../shared/cards.js';
 import { chooseMove } from '../server/bot.js';
-import { ask, askableCards, canDeclare, createGame, declare } from '../server/game.js';
+import { ask, askableCards, canDeclare, createGame, declare, timeout } from '../server/game.js';
 
 /** A small seeded generator so failures are reproducible. */
 function seeded(seed) {
@@ -246,6 +246,26 @@ test('a player left with no cards passes the turn to a teammate, then to the opp
   assert.equal(ask(toFoes, 'p1', 'p0', '10H').ok, false);
 });
 
+test('running out of time passes the turn to the next opponent who has cards', () => {
+  const game = rigged({ p0: ['2S'], p1: [], p2: ['3S'], p3: ['4S', '5S', '6S', '7S'] });
+  assert.equal(timeout(game, 'p2').ok, false, 'only the player to move can run out of time');
+  const result = timeout(game, 'p0');
+  // p1 is next round the table but has no cards, so it goes to p3.
+  assert.deepEqual(result.event, { type: 'timeout', seq: 1, player: 'p0', nextTurn: 'p3' });
+  assert.equal(game.turn, 'p3');
+  assert.deepEqual([...game.hands.get('p0')], ['2S'], 'no cards move');
+  assert.deepEqual(game.score, { A: 0, B: 0 });
+
+  // With the other team out of cards, a teammate has to carry on.
+  const mates = rigged({ p0: ['2S'], p2: ['3S', '4S', '5S', '6S', '7S'] });
+  assert.equal(timeout(mates, 'p0').event.nextTurn, 'p2');
+
+  // The last player with cards has nobody to pass to.
+  const alone = rigged({ p0: LOW_SPADES });
+  assert.equal(timeout(alone, 'p0').ok, false);
+  assert.deepEqual([alone.turn, alone.log.length], ['p0', 0]);
+});
+
 test('the game ends when the last set is claimed', () => {
   const game = rigged({ p0: LOW_SPADES, p1: HIGH_HEARTS });
   game.sets.forEach((set) => {
@@ -288,7 +308,10 @@ test('random legal play always reaches the end with the cards accounted for', ()
       const me = game.seats.find((seat) => seat.id === game.turn);
       const foes = game.seats.filter((seat) => seat.team !== me.team && game.hands.get(seat.id).size > 0);
       const cards = askableCards(game, me.id);
-      if (foes.length > 0 && cards.length > 0 && rng() < 0.97) {
+      if (rng() < 0.03 && timeout(game, me.id).ok) {
+        // Now and then somebody runs out of time instead of moving.
+        assert.notEqual(game.turn, me.id);
+      } else if (foes.length > 0 && cards.length > 0 && rng() < 0.97) {
         assert.equal(ask(game, me.id, pick(foes).id, pick(cards)).ok, true);
       } else {
         // Anyone the rule allows declares some open set, naming players from one team or the other.

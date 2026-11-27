@@ -139,7 +139,7 @@ test('lobby: joining, teams, bots, settings and host-only actions', async () => 
   await host.fails({ t: 'settings', settings: { deck: 48 } });
   await host.fails({ t: 'settings', settings: { constructor: 1 } });
   state = await host.act({ t: 'settings', settings: { deck: 72, history: 'last' } }, (s) => s.settings.deck === 72);
-  assert.deepEqual(state.settings, { deck: 72, declare: 'team', history: 'last', botPace: 'step' });
+  assert.deepEqual(state.settings, { deck: 72, declare: 'team', history: 'last', botPace: 'step', moveTime: 60, timeBank: 120 });
 
   // Switching teams, and a full team refusing a fifth player.
   const teamA = (s) => s.members.filter((m) => m.team === 'A');
@@ -263,6 +263,96 @@ test('declaring: any time your team has the turn, naming your team’s players o
   assert.equal(event.team, event.correct ? turnTeam : teamOf.get(others[0]));
   assert.equal(reply.game.score[event.team], 1);
   assert.equal(reply.game.turn, views[0].game.turn, 'the turn stays with the player who had it');
+});
+
+test('the clock: time for each move, then the time bank, then the turn is lost', async () => {
+  // Its own server, where a "second" lasts 30ms: 10 seconds a move is 300ms, and a 15 second bank is 450ms.
+  const fast = createApp({ secondMs: 30, lobbyDelayMs: 5 });
+  const fastPort = await fast.listen(0, '127.0.0.1');
+  try {
+    const { host } = await createRoom('Ada', undefined, fastPort);
+    const code = (await host.state(() => true, { fresh: false })).code;
+    const guests = [];
+    for (const name of ['Bo', 'Cy', 'Di']) {
+      const client = await connect(fastPort);
+      client.send({ t: 'join', code, name });
+      await client.state();
+      guests.push(client);
+    }
+    const clients = [host, ...guests];
+
+    // Only the lengths on offer can be chosen, and only before the game.
+    await host.fails({ t: 'settings', settings: { moveTime: 7 } });
+    await host.fails({ t: 'settings', settings: { timeBank: -1 } });
+    const lobby = await host.act({ t: 'settings', settings: { moveTime: 10, timeBank: 15 } }, (s) => s.settings.moveTime === 10 && s.settings.timeBank === 15);
+    assert.ok(lobby.members.every((m) => m.bank === null), 'no banks until a game starts');
+
+    const started = clients.map((client) => client.state((s) => s.phase === 'playing'));
+    host.send({ t: 'start' });
+    const views = await Promise.all(started);
+    const first = views[0].game.turn;
+    const teamOf = new Map(views[0].members.map((m) => [m.id, m.team]));
+    const clientOf = new Map(views.map((view, i) => [view.you, clients[i]]));
+
+    // Everyone starts with a full bank, and the player to move is on the clock.
+    assert.deepEqual(views[0].members.map((m) => m.bank), [450, 450, 450, 450]);
+    const { clock } = views[0].game;
+    assert.equal(clock.player, first);
+    assert.ok(clock.move > 200 && clock.move <= 300, `move time left: ${clock.move}`);
+    assert.equal(clock.bank, 450);
+
+    // The first player thinks for 400ms: 100ms longer than a move allows, so it comes out of their bank.
+    await pause(400);
+    const mine = views.find((view) => view.you === first);
+    const target = mine.members.find((m) => m.team !== teamOf.get(first) && m.cards > 0);
+    const missing = buildSets(54).flatMap((set) => (set.cards.some((card) => mine.game.hand.includes(card)) ? set.cards.filter((card) => !mine.game.hand.includes(card)) : []))[0];
+    const asked = await clientOf.get(first).act({ t: 'ask', target: target.id, card: missing }, (s) => s.game.log.length === 1);
+    assert.equal(asked.t, 'state', asked.message);
+    const bank = asked.members.find((m) => m.id === first).bank;
+    assert.ok(bank < 450 && bank > 150, `bank after 100ms of overtime: ${bank}`);
+    const others = asked.members.filter((m) => m.id !== first && m.id !== asked.game.clock.player);
+    assert.ok(others.every((m) => m.bank === 450), 'nobody else has been charged');
+
+    // Whoever is to move now does nothing at all: their move time and bank run out, and the turn passes.
+    const idle = asked.game.turn;
+    assert.equal(asked.game.clock.player, idle);
+    const after = await host.state((s) => s.game.log.at(-1).type === 'timeout');
+    const event = after.game.log.at(-1);
+    assert.deepEqual([event.player, event.nextTurn], [idle, after.game.turn]);
+    assert.notEqual(teamOf.get(after.game.turn), teamOf.get(idle), 'the turn goes to the other team');
+    assert.equal(after.members.find((m) => m.id === idle).bank, 0);
+    assert.equal(after.game.clock.player, after.game.turn, 'and the next player is on the clock');
+    assert.equal(after.game.log.length, 2);
+  } finally {
+    await fast.close();
+  }
+});
+
+test('bots are never on the clock, and a game with no time limit has none', async () => {
+  const { host } = await createRoom('Ada');
+  for (const team of ['A', 'B', 'B']) host.send({ t: 'addBot', team });
+  await host.state((s) => s.members.length === 4);
+  let playing = host.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  let state = await playing;
+  for (let moves = 0; moves < 6 && state.phase === 'playing'; moves++) {
+    const mover = state.members.find((m) => m.id === state.game.turn);
+    // With the default limit, the clock runs for the person and stands still for the bots.
+    assert.equal(state.game.clock?.player ?? null, mover.bot ? null : mover.id);
+    assert.deepEqual(state.members.map((m) => m.bank), state.members.map((m) => (m.bot ? null : 120_000)));
+    if (!mover.bot) break;
+    state = await host.act({ t: 'next', at: state.game.position }, (s) => s.game.position > state.game.position);
+  }
+
+  // The same table again with the limit switched off.
+  await host.act({ t: 'toLobby' }, (s) => s.phase === 'lobby');
+  await host.act({ t: 'settings', settings: { moveTime: 0 } }, (s) => s.settings.moveTime === 0);
+  playing = host.state((s) => s.phase === 'playing');
+  host.send({ t: 'start' });
+  state = await humanToMove(host);
+  assert.equal((await playing).game.clock, null);
+  assert.equal(state.game.clock, null);
+  assert.ok(state.members.every((m) => m.bank === null));
 });
 
 test('reconnecting with a token restores the seat; a stranger can take over an abandoned one', async () => {

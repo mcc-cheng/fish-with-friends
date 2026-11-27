@@ -138,6 +138,25 @@ export function declare(game, declarerId, setId, assignment) {
 }
 
 /**
+ * The player to move has run out of time and loses the turn. It goes to the next
+ * opponent round the table who has cards (or, if the other team is out of cards,
+ * to the next teammate). Fails if there is nobody else to give it to.
+ */
+export function timeout(game, playerId) {
+  if (game.phase !== 'playing') return fail('The game is over.');
+  if (game.turn !== playerId) return fail("It isn't their turn.");
+  const i = game.seats.findIndex((seat) => seat.id === playerId);
+  const hasCards = (seat) => game.hands.get(seat.id).size > 0;
+  const around = [...game.seats.slice(i + 1), ...game.seats.slice(0, i)];
+  const next = around.find((seat) => seat.team !== game.seats[i].team && hasCards(seat)) ?? around.find(hasCards);
+  if (!next) return fail('There is nobody to pass the turn to.');
+  game.turn = next.id;
+  const event = { type: 'timeout', seq: game.log.length + 1, player: playerId, nextTurn: next.id };
+  game.log.push(event);
+  return { ok: true, event };
+}
+
+/**
  * After cards leave play: end the game if every set is claimed, otherwise make
  * sure the turn sits with someone who still has cards. An empty-handed player
  * hands the turn to the next teammate around the table who has cards, and to

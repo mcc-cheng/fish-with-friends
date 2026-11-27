@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { sortCards } from '../shared/cards.js';
 import { chooseMove } from './bot.js';
-import { ask, canDeclare, createGame, declare, DECLARE_RULES, otherTeam, shuffle } from './game.js';
+import { ask, canDeclare, createGame, declare, DECLARE_RULES, otherTeam, shuffle, timeout } from './game.js';
 import { History } from './history.js';
 import { Ratings, playerId } from './ratings.js';
 
@@ -27,6 +27,8 @@ const SETTING_VALUES = {
   declare: DECLARE_RULES,
   history: ['full', 'last'],
   botPace: ['step', 'auto'], // bots wait for a player to press Next, or play by themselves after a pause
+  moveTime: [60, 0, 10, 15, 20, 30, 45, 90, 120, 180, 300], // seconds a player has for each move; 0 is no limit
+  timeBank: [120, 0, 15, 30, 60, 180, 300, 600], // seconds of extra time each player has for the whole game
 };
 
 function cleanName(raw) {
@@ -69,6 +71,7 @@ export class Rooms {
       graceMs: 30_000, // how long a dropped connection keeps its place before others move on
       emptyTtlMs: 20 * 60_000, // how long a room with nobody connected survives
       lobbyDelayMs: 150, // lobby updates are batched over this long
+      secondMs: 1000, // how long a second of the move clock lasts (tests run it fast)
       stale: () => false, // whether newer server code is waiting on disk for a restart
       maxRooms: 1000,
       rng: Math.random,
@@ -295,6 +298,7 @@ export class Rooms {
   destroy(room) {
     clearTimeout(room.botTimer);
     clearTimeout(room.ttlTimer);
+    clearTimeout(room.clock?.timer);
     for (const member of room.members.values()) {
       clearTimeout(member.graceTimer);
       if (member.conn) member.conn.room = member.conn.member = null;
@@ -410,6 +414,7 @@ export class Rooms {
           declareRule: room.settings.declare,
           rng,
         });
+        this.resetClock(room);
         return;
       }
 
@@ -477,6 +482,7 @@ export class Rooms {
         clearTimeout(room.botTimer);
         room.botTimer = room.botKey = null;
         room.game = null;
+        this.resetClock(room);
         room.rating = null; // a game ended early changes nobody's rating
         for (const m of [...room.members.values()]) {
           m.botControlled = false;
@@ -494,6 +500,7 @@ export class Rooms {
 
   broadcast(room) {
     if (this.rooms.get(room.code) !== room) return;
+    this.syncClock(room);
     const log = this.visibleLog(room);
     for (const member of room.members.values()) member.conn?.send(this.view(room, member, log));
     this.scheduleBot(room);
@@ -515,6 +522,7 @@ export class Rooms {
   /** The room as one member may see it: everyone's card counts, but only their own hand. */
   view(room, member, log = this.visibleLog(room)) {
     const game = room.game;
+    const clock = this.clockNow(room);
     return {
       t: 'state',
       code: room.code,
@@ -535,6 +543,8 @@ export class Rooms {
         auto: m.botControlled,
         cards: game?.hands.get(m.id)?.size ?? null,
         rating: m.pid ? this.ratings.rating(m.pid) : null,
+        // Extra time left for the game, in ms (only for seated players in a timed game).
+        bank: (m.id === clock?.player ? clock.bank : room.clock?.bank.get(m.id)) ?? null,
       })),
       game: game && {
         deck: game.deck,
@@ -548,6 +558,8 @@ export class Rooms {
         log,
         position: game.log.length, // counts every move, even when the visible log is cut short
         awaitingNext: room.settings.botPace === 'step' && Boolean(this.botToMove(room)),
+        clock, // who is on the clock and how long they have left, as of this message
+
         ratingChanges: room.rating?.changes?.map(({ id, ...change }) => ({ ...change, you: id === member.pid })) ?? null,
       },
     };
@@ -596,6 +608,80 @@ export class Rooms {
         return change ? { ...p, delta: change.delta, after: change.after } : p;
       }),
     });
+  }
+
+  // ---- the clock ----
+  //
+  // In a timed game each move has a fixed allowance. A player who uses it up
+  // starts on their time bank, a reserve that lasts them the whole game. When
+  // that is gone too they lose the turn. Only people are timed, never bots.
+
+  /** A full time bank for everyone in the game that has just started, or no clock at all. */
+  resetClock(room) {
+    clearTimeout(room.clock?.timer);
+    const { moveTime, timeBank } = room.settings;
+    const timed = room.game && moveTime > 0;
+    room.clock = timed
+      ? {
+          // Each human seat's reserve for the game, in ms. Bots have none: they are never timed.
+          bank: new Map(room.game.seats.filter((seat) => !room.members.get(seat.id).isBot).map((seat) => [seat.id, timeBank * this.options.secondMs])),
+          key: null, // the move being timed: "<player>:<moves so far>"
+          player: null,
+          startedAt: 0,
+          moveMs: 0,
+          timer: null,
+        }
+      : null;
+  }
+
+  /**
+   * Makes the clock match the game: stops it if the move it was timing has been
+   * made (taking any overtime out of that player's bank), and starts it for
+   * whoever has to move now. Called on every broadcast, so it must change
+   * nothing while the same move is still being waited for.
+   */
+  syncClock(room) {
+    const { game, clock } = room;
+    if (!clock) return;
+    const mover = game.phase === 'playing' ? room.members.get(game.turn) : null;
+    // Nobody is timed while every player is away: the game simply waits for someone to come back.
+    const someoneHere = game.seats.some((seat) => room.members.get(seat.id)?.connected && !room.members.get(seat.id).isBot);
+    const timed = mover && !mover.isBot && !mover.botControlled && someoneHere;
+    const key = timed ? `${mover.id}:${game.log.length}` : null;
+    if (key === clock.key) return;
+
+    if (clock.key) {
+      clearTimeout(clock.timer);
+      const over = Date.now() - clock.startedAt - clock.moveMs;
+      if (over > 0) clock.bank.set(clock.player, Math.max(0, clock.bank.get(clock.player) - over));
+    }
+    Object.assign(clock, { key, player: timed ? mover.id : null, startedAt: Date.now(), moveMs: room.settings.moveTime * this.options.secondMs, timer: null });
+    if (timed) clock.timer = timer(() => this.timeUp(room, key), clock.moveMs + clock.bank.get(mover.id));
+  }
+
+  /** The player on the clock and what they have left right now: { player, move, bank } in ms, or null. */
+  clockNow(room) {
+    const clock = room.clock;
+    if (!clock?.key) return null;
+    const spent = Date.now() - clock.startedAt;
+    return {
+      player: clock.player,
+      move: Math.max(0, clock.moveMs - spent),
+      bank: Math.max(0, clock.bank.get(clock.player) - Math.max(0, spent - clock.moveMs)),
+    };
+  }
+
+  /** A player's move time and time bank have both run out: they lose the turn. */
+  timeUp(room, key) {
+    const { game, clock } = room;
+    if (this.rooms.get(room.code) !== room || clock?.key !== key) return;
+    const id = clock.player;
+    clock.bank.set(id, 0);
+    clock.key = clock.player = null;
+    // With nobody to pass the turn to, the cards left are all theirs: a bot declares them.
+    if (!timeout(game, id).ok) this.moveBot(room, id);
+    this.settleGame(room);
+    this.broadcast(room);
   }
 
   // ---- bots ----
