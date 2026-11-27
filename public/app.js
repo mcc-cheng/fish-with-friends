@@ -1124,21 +1124,15 @@ function gameScreen() {
   const c = gameContext();
   return h(
     'div',
-    { class: 'page' },
+    { class: 'page game-page' },
     topbar(),
     h(
       'div',
       { class: 'game' },
-      h(
-        'main',
-        { class: 'game-main' },
-        scoreboard(c),
-        playersPanel(c),
-        banner(c),
-        c.g.winner ? resultPanel(c) : actionPanel(c),
-        c.seated && !c.g.winner ? handPanel(c) : null,
-      ),
-      logPanel(c),
+      // The table: the score, the players, the latest move and your cards.
+      h('main', { class: 'game-main' }, scoreboard(c), playersPanel(c), banner(c), c.g.winner ? resultPanel(c) : null, c.seated && !c.g.winner ? handPanel(c) : null),
+      // Beside it on a wide screen: your move, and everything that has happened.
+      h('aside', { class: 'game-side' }, c.g.winner ? null : actionPanel(c), logPanel(c)),
     ),
   );
 }
@@ -1188,7 +1182,7 @@ function playersPanel(c) {
         'div',
         { class: `player-group team-${team}` },
         h('h2', {}, h('span', { class: 'team-dot' }), title),
-        h('div', { class: 'seat-row' }, c.seats.filter((m) => m.team === team).map((m) => seat(c, m))),
+        h('div', { class: 'seat-row', style: `--seats: ${c.seats.length / 2}` }, c.seats.filter((m) => m.team === team).map((m) => seat(c, m))),
       ),
     ),
   );
@@ -1204,8 +1198,9 @@ function seat(c, m) {
     h(
       'div',
       { class: 'seat-main' },
-      h('div', { class: 'seat-name' }, h('span', { class: 'nm' }, m.name), memberTags(m, { host: false })),
-      turn ? h('span', { class: 'turn-pill' }, 'to play') : null,
+      h('span', { class: 'nm', title: m.name }, m.name),
+      // Always there, so a seat keeps its height when the turn arrives.
+      h('div', { class: 'seat-tags' }, memberTags(m, { host: false }), turn ? h('span', { class: 'turn-pill' }, 'to play') : null),
       playing && away && c.isHost
         ? h('button', { class: 'btn tiny', onclick: () => send({ t: 'botControl', id: m.id, on: !m.auto }) }, m.auto ? 'Stop the bot' : 'Let a bot play')
         : null,
@@ -1440,8 +1435,7 @@ function chooseDeclareSet(c, set, side = state.declSide) {
 }
 
 function declareForm(c) {
-  const open = c.sets.filter((s) => !s.claimedBy);
-  const set = open.find((s) => s.id === state.declSet);
+  const set = c.sets.find((s) => s.id === state.declSet && !s.claimedBy);
   const theirs = other(c.myTeam);
   const named = c.seats.filter((m) => m.team === (state.declSide === 'mine' ? c.myTeam : theirs) && m.id !== c.v.you);
   const complete = set?.cards.every((card) => state.declAssign[card]);
@@ -1460,16 +1454,23 @@ function declareForm(c) {
   return h(
     'div',
     { class: 'declare' },
-    h('p', { class: 'hint' }, 'Say who holds each card. They must all be on your team, or all on the other team. One mistake and the other team takes the set.'),
+    // Every set keeps its place in the picker: suits across, low above high. Sets already won are switched off.
     h(
       'div',
-      { class: 'pills' },
-      open.map((s) =>
+      { class: 'set-picker', role: 'group', 'aria-label': 'Set to declare' },
+      c.sets.map((s) =>
         h(
           'button',
-          { class: 'pill', 'aria-pressed': String(s.id === state.declSet), 'aria-label': s.name, onclick: () => chooseDeclareSet(c, s) },
+          {
+            class: cls('pill', !s.suit && 'tall', s.claimedBy && `team-${s.claimedBy}`),
+            'aria-pressed': String(s.id === state.declSet),
+            'aria-label': s.name,
+            title: s.claimedBy ? `${s.name}: won by ${TEAM_NAMES[s.claimedBy]}` : `${s.name}: you hold ${s.held} of ${s.cards.length}`,
+            disabled: Boolean(s.claimedBy),
+            onclick: () => chooseDeclareSet(c, s),
+          },
           setLabel(s),
-          s.held ? h('span', { class: 'pill-count' }, `${s.held}/${s.cards.length}`) : null,
+          s.held && !s.claimedBy ? h('span', { class: 'pill-count' }, s.held) : null,
         ),
       ),
     ),
@@ -1482,6 +1483,7 @@ function declareForm(c) {
           sideButton('theirs', theirs, 'The other team', set.held > 0),
         )
       : null,
+    // One row per card, one column per player, so a name stays in the same place all the way down.
     set
       ? h(
           'div',
@@ -1490,7 +1492,7 @@ function declareForm(c) {
             h(
               'div',
               { class: 'assign-row' },
-              cardEl(card, { small: true }),
+              cardChip(card),
               c.hand.has(card)
                 ? h('span', { class: 'pill locked' }, 'You have it')
                 : h(
@@ -1503,12 +1505,13 @@ function declareForm(c) {
                           class: `pill team-${m.team}`,
                           'aria-pressed': String(state.declAssign[card] === m.id),
                           disabled: m.cards === 0,
+                          title: m.name,
                           onclick: () => {
                             state.declAssign[card] = m.id;
                             render();
                           },
                         },
-                        m.name,
+                        h('span', { class: 'nm' }, m.name),
                       ),
                     ),
                   ),
@@ -1516,6 +1519,9 @@ function declareForm(c) {
           ),
         )
       : null,
+    set
+      ? h('p', { class: 'hint reminder' }, 'One mistake and the other team takes the set.')
+      : h('p', { class: 'hint' }, 'Pick a set, then say who holds each card: all on your team, or all on the other team.'),
     h('button', { class: 'btn primary big', disabled: !complete || state.busy, onclick: submitDeclare }, set ? `Declare ${set.name}` : 'Pick a set'),
   );
 }
@@ -1597,7 +1603,7 @@ function logPanel(c) {
     );
   };
   return h(
-    'aside',
+    'section',
     { class: 'log panel', 'aria-label': 'Game log' },
     h('h2', {}, lastOnly ? 'Last question' : 'Game log'),
     lastOnly ? h('p', { class: 'muted small' }, 'This room only shows the latest question. Remember the rest!') : null,
